@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     # --- Display ---
     report_owner: str = "Account owner"
     currency_symbol: str = "€"
+    # Timezone the scheduled jobs run in (IANA name).
+    timezone: str = "UTC"
 
     # --- Investments: ISIN -> ticker lookup (OpenFIGI, optional) ---
     openfigi_api_key: str = ""
