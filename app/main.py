@@ -71,3 +71,8 @@ app.include_router(expenses.router)
 app.include_router(investments.router)
 app.include_router(banks.router)
 app.include_router(reports.router)
+
+# Telegram bot, only when a token is configured.
+if settings.telegram_enabled:
+    from app.routers import telegram
+    app.include_router(telegram.router)
