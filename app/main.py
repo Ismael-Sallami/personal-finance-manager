@@ -1,15 +1,12 @@
 """FastAPI application: personal finance manager."""
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.auth import _NotAuthenticated, require_user
+from app.auth import _NotAuthenticated
 from app.config import APP_ROOT, settings
-from app.models import User
-from app.routers import auth_routes, banks, expenses, investments
-from app.security import get_csrf_token
-from app.templating import templates
+from app.routers import auth_routes, banks, dashboard, expenses, investments
 
 # In production the auto-generated docs are hidden: no need to publish the API
 # schema of a single-user app.
@@ -69,18 +66,7 @@ async def _auth_redirect(request: Request, exc: _NotAuthenticated):
 
 
 app.include_router(auth_routes.router)
+app.include_router(dashboard.router)
 app.include_router(expenses.router)
 app.include_router(investments.router)
 app.include_router(banks.router)
-
-
-@app.get("/")
-def home(request: Request, user: User = Depends(require_user)):
-    return templates.TemplateResponse(
-        "placeholder.html",
-        {
-            "request": request, "user": user, "active": "dashboard",
-            "csrf_token": get_csrf_token(request),
-            "title": "Dashboard", "msg": "Nothing here yet.",
-        },
-    )

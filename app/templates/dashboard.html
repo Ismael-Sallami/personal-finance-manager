@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block header %}Dashboard{% endblock %}
+{% block content %}
+
+<!-- Month / year picker -->
+<form method="get" action="/" class="flex flex-wrap items-center gap-2 mb-6">
+  <select name="month" onchange="this.form.submit()" class="bg-panel2 border border-white/10 rounded-lg px-3 py-2 text-sm">
+    {% for m in range(1,13) %}<option value="{{ m }}" {{ 'selected' if m==month }}>{{ m|month }}</option>{% endfor %}
+  </select>
+  <select name="year" onchange="this.form.submit()" class="bg-panel2 border border-white/10 rounded-lg px-3 py-2 text-sm">
+    {% for y in years %}<option value="{{ y }}" {{ 'selected' if y==year }}>{{ y }}</option>{% endfor %}
+    {% if year not in years %}<option value="{{ year }}" selected>{{ year }}</option>{% endif %}
+  </select>
+</form>
+
+{% if not has_data %}
+<div class="glass border border-accent/20 rounded-2xl p-6 mb-6 text-sm text-dim">
+  Nothing recorded yet. Start in <a href="/expenses" class="text-accent">Expenses</a> or
+  <a href="/investments" class="text-accent">Investments</a>.
+</div>
+{% endif %}
+
+<!-- KPIs -->
+<div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
+  <div class="kpi-hero rounded-2xl p-5 border border-accent/30">
+    <div class="text-xs text-dim mb-1">NET WORTH</div>
+    <div class="text-3xl font-extrabold text-accent">{{ kpis.net_worth | money }}</div>
+    <div class="text-[11px] text-dim mt-1">
+      📈 {{ kpis.inv_value | money }} · 🏦 {{ kpis.bank_balance | money }}
+    </div>
+    <div class="text-xs mt-0.5 {{ 'text-ok' if kpis.inv_profit >= 0 else 'text-danger' }}">
+      {{ '▲' if kpis.inv_profit >= 0 else '▼' }} {{ kpis.inv_profit | money }} ({{ kpis.return_pct | pct(2) }})
+    </div>
+  </div>
+  <div class="glass rounded-2xl p-5 border border-white/10">
+    <div class="text-xs text-dim mb-1">INCOME · {{ month|month }}</div>
+    <div class="text-2xl font-bold text-ok">{{ kpis.month_income | money }}</div>
+  </div>
+  <div class="glass rounded-2xl p-5 border border-white/10">
+    <div class="text-xs text-dim mb-1">EXPENSES · {{ month|month }}</div>
+    <div class="text-2xl font-bold text-danger">{{ kpis.month_expense | money }}</div>
+  </div>
+  <div class="glass rounded-2xl p-5 border border-white/10">
+    <div class="text-xs text-dim mb-1">SAVED · {{ month|month }}</div>
+    <div class="text-2xl font-bold {{ 'text-ok' if kpis.month_saved >= 0 else 'text-danger' }}">{{ kpis.month_saved | money }}</div>
+    {% if kpis.month_invested > 0 %}<div class="text-xs text-dim mt-1">of which {{ kpis.month_invested | money }} invested</div>{% endif %}
+  </div>
+</div>
+
+<!-- Charts -->
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+  <div class="glass rounded-2xl p-5 border border-white/10 lg:col-span-2">
+    <div class="text-sm font-semibold mb-3">Income vs expenses · {{ year }}</div>
+    <div class="relative h-64"><canvas id="chartCF"></canvas></div>
+  </div>
+  <div class="glass rounded-2xl p-5 border border-white/10">
+    <div class="text-sm font-semibold mb-3">Expenses by category · {{ month|month }}</div>
+    <div class="relative h-64"><canvas id="chartCat"></canvas></div>
+  </div>
+  <div class="glass rounded-2xl p-5 border border-white/10 lg:col-span-2">
+    <div class="text-sm font-semibold mb-3">Net worth over time</div>
+    <div class="relative h-56"><canvas id="chartNW"></canvas></div>
+  </div>
+  <div class="glass rounded-2xl p-5 border border-white/10">
+    <div class="text-sm font-semibold mb-3">Net worth split</div>
+    <div class="relative h-56"><canvas id="chartSplit"></canvas></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Chart.js is loaded with defer, so draw on DOMContentLoaded when it is ready.
+  document.addEventListener('DOMContentLoaded', function () {
+    if (typeof Chart === 'undefined') return;
+    const CH = {{ charts | tojson }};
+    Chart.defaults.color = '#93a4b8';
+    Chart.defaults.borderColor = 'rgba(255,255,255,0.06)';
+    const PAL = ['#3b82f6','#22c55e','#f59e0b','#a855f7','#ec4899','#14b8a6','#ef4444','#84cc16','#06b6d4','#f97316'];
+    const MONTH = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const el = (id) => document.getElementById(id);
+
+    if (el('chartCF')) new Chart(el('chartCF'), {
+      type:'bar',
+      data:{ labels: CH.cashflow.labels.map(m=>MONTH[m]), datasets:[
+        { label:'Income', data:CH.cashflow.income, backgroundColor:'#22c55e' },
+        { label:'Expenses', data:CH.cashflow.expenses, backgroundColor:'#ef4444' },
+      ]},
+      options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom'}} }
+    });
+
+    if (el('chartCat') && CH.categories.labels.length) new Chart(el('chartCat'), {
+      type:'doughnut',
+      data:{ labels:CH.categories.labels, datasets:[{ data:CH.categories.data, backgroundColor:PAL }] },
+      options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom'}} }
+    });
+
+    if (el('chartNW') && CH.net_worth.labels.length) new Chart(el('chartNW'), {
+      type:'line',
+      data:{ labels:CH.net_worth.labels, datasets:[{ label:'Net worth', data:CH.net_worth.data,
+        borderColor:'#3b82f6', backgroundColor:'rgba(59,130,246,0.15)', fill:true, tension:0.3 }] },
+      options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}} }
+    });
+
+    if (el('chartSplit') && CH.split.labels.length) new Chart(el('chartSplit'), {
+      type:'doughnut',
+      data:{ labels:CH.split.labels, datasets:[{ data:CH.split.data, backgroundColor:PAL }] },
+      options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom'}} }
+    });
+  });
+</script>
+{% endblock %}
