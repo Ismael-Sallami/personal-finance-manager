@@ -1,0 +1,41 @@
+# Brings the app up with its own Postgres on any machine, in one command:
+#
+#   cp .env.example .env    # fill in SECRET_KEY, APP_USER_*, TELEGRAM_*
+#   docker compose up -d
+#   docker compose exec app alembic upgrade head
+#   docker compose exec app python -m scripts.seed
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: finance
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-finance}
+      POSTGRES_DB: finance
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The app waits until Postgres accepts connections, not just until it starts.
+      test: ["CMD-SHELL", "pg_isready -U finance -d finance"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    build: .
+    env_file: .env
+    environment:
+      # Overrides DATABASE_URL from .env: here the database is the container next door.
+      DATABASE_URL: postgresql+psycopg2://finance:${POSTGRES_PASSWORD:-finance}@db:5432/finance
+      PORT: "8080"
+      # Always-on machine: the in-process scheduler is enough, no external cron needed.
+      USE_SCHEDULER: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

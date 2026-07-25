@@ -1,0 +1,48 @@
+# Render blueprint (free plan). The app sleeps after ~15 minutes without
+# traffic, so the scheduled jobs are driven by an external cron against
+# /tasks/* (USE_SCHEDULER=false). The database is any managed Postgres you
+# point DATABASE_URL at.
+#
+# Deploy: New > Blueprint > connect the repo. Fill the `sync: false` values in
+# the dashboard (Environment). After the first deploy run the migration once
+# from the service Shell: `alembic upgrade head`.
+services:
+  - type: web
+    name: personal-finance-manager
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: IS_PROD
+        value: "true"
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: USE_SCHEDULER
+        value: "false"
+      # --- Secrets: set them in the dashboard, never in the repo ---
+      - key: DATABASE_URL          # Postgres URL (sslmode=require)
+        sync: false
+      - key: SECRET_KEY            # openssl rand -hex 32
+        sync: false
+      - key: PUBLIC_BASE_URL       # https://<your-service>.onrender.com
+        sync: false
+      - key: TASKS_TOKEN           # openssl rand -hex 16 (for the external cron)
+        sync: false
+      - key: APP_USER_EMAIL
+        sync: false
+      - key: APP_USER_PASSWORD
+        sync: false
+      - key: REPORT_OWNER
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
+      - key: OPENFIGI_API_KEY
+        sync: false
