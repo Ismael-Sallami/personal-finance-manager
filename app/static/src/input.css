@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+/* Dark finance palette: blue for net worth, green for income, red for spending.
+   The --color-* tokens generate the bg-*, text-* and border-* utilities in
+   Tailwind v4. Rebuild app.css after editing:
+     tailwindcss -i app/static/src/input.css -o app/static/css/app.css --minify */
+@theme {
+  --color-bg: #0b0f17;
+  --color-panel: #131b27;
+  --color-panel2: #1b2535;
+  --color-accent: #3b82f6;
+  --color-accent2: #8b5cf6;
+  --color-ok: #22c55e;
+  --color-danger: #ef4444;
+  --color-dim: #93a4b8;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-bg);
+}
+
+/* Frosted glass cards */
+.glass {
+  background: color-mix(in srgb, var(--color-panel) 78%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+/* Active navigation item */
+.nav-link.active {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--color-accent) 16%, transparent), transparent);
+  color: var(--color-accent);
+  border-left: 3px solid var(--color-accent);
+}
+
+/* Highlighted KPI card (net worth) */
+.kpi-hero {
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--color-accent) 16%, transparent),
+    color-mix(in srgb, var(--color-accent2) 10%, transparent));
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--color-panel2); border-radius: 6px; }

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block header %}{{ title }}{% endblock %}
+{% block content %}
+<div class="glass border border-white/10 rounded-2xl p-10 text-center">
+  <div class="text-5xl mb-4">🚧</div>
+  <h2 class="text-xl font-semibold mb-2">{{ title }}</h2>
+  <p class="text-dim">{{ msg }}</p>
+</div>
+{% endblock %}
