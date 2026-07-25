@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}Expenses · {{ month|month }} {{ year }}{% endblock %}
+{% block header %}Expenses and income{% endblock %}
+{% block content %}
+
+<!-- Month / year picker -->
+<div class="flex flex-wrap items-center gap-3 mb-6">
+  <form method="get" action="/expenses" class="flex gap-2">
+    <select name="month" onchange="this.form.submit()" class="bg-panel2 border border-white/10 rounded-lg px-3 py-2 text-sm">
+      {% for m in range(1,13) %}<option value="{{ m }}" {{ 'selected' if m==month }}>{{ m|month }}</option>{% endfor %}
+    </select>
+    <select name="year" onchange="this.form.submit()" class="bg-panel2 border border-white/10 rounded-lg px-3 py-2 text-sm">
+      {% for y in years %}<option value="{{ y }}" {{ 'selected' if y==year }}>{{ y }}</option>{% endfor %}
+      {% if year not in years %}<option value="{{ year }}" selected>{{ year }}</option>{% endif %}
+    </select>
+  </form>
+  <a href="/expenses/yearly?year={{ year }}" class="text-sm text-accent hover:underline ml-auto">Yearly summary →</a>
+</div>
+
+<!-- KPIs -->
+<div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+  <div class="glass rounded-2xl p-5 border border-white/10"><div class="text-xs text-dim">INCOME</div><div class="text-2xl font-bold text-ok">{{ total_income|money }}</div></div>
+  <div class="glass rounded-2xl p-5 border border-white/10"><div class="text-xs text-dim">EXPENSES</div><div class="text-2xl font-bold text-danger">{{ total_expense|money }}</div></div>
+  <div class="glass rounded-2xl p-5 border border-white/10"><div class="text-xs text-dim">BALANCE</div><div class="text-2xl font-bold {{ 'text-ok' if balance>=0 else 'text-danger' }}">{{ balance|money }}</div></div>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+  <!-- Table + entry form -->
+  <div class="lg:col-span-2 space-y-4">
+    <div class="glass rounded-2xl p-5 border border-white/10">
+      <div class="text-sm font-semibold mb-3">Add entry</div>
+      <form method="post" action="/expenses/add" class="grid grid-cols-2 sm:grid-cols-6 gap-2 items-end">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="year" value="{{ year }}"><input type="hidden" name="month" value="{{ month }}">
+        <select name="kind" class="col-span-2 sm:col-span-1 bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm">
+          <option value="expense">Expense</option><option value="income">Income</option>
+        </select>
+        <input name="category" placeholder="Category" required class="col-span-2 bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm">
+        <input name="amount" placeholder="0.00" required class="bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm">
+        <input name="day" type="number" min="1" max="28" value="1" class="bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm" title="Day">
+        <button class="bg-accent text-bg font-semibold rounded-lg px-3 py-2 text-sm hover:brightness-110">+ Add</button>
+      </form>
+    </div>
+
+    <div class="glass rounded-2xl border border-white/10 overflow-hidden">
+      <div class="overflow-x-auto">
+      <table class="w-full text-sm whitespace-nowrap">
+        <thead class="text-dim text-xs uppercase border-b border-white/10">
+          <tr><th class="text-left px-4 py-3">Category</th><th class="text-left px-4 py-3">Kind</th><th class="text-right px-4 py-3">Amount</th><th class="px-4 py-3"></th></tr>
+        </thead>
+        <tbody>
+          {% for t in txs %}
+          <tr class="border-b border-white/5 hover:bg-white/5">
+            <td class="px-4 py-2.5">{{ t.category }}{% if t.note %}<span class="text-dim text-xs"> · {{ t.note }}</span>{% endif %}</td>
+            <td class="px-4 py-2.5"><span class="text-xs px-2 py-0.5 rounded-full {{ 'bg-ok/15 text-ok' if t.kind=='income' else 'bg-danger/15 text-danger' }}">{{ t.kind }}</span></td>
+            <td class="px-4 py-2.5 text-right font-mono">{{ t.amount|money }}</td>
+            <td class="px-4 py-2.5 text-right">
+              <form method="post" action="/expenses/delete/{{ t.id }}" onsubmit="return confirm('Delete?')">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="year" value="{{ year }}"><input type="hidden" name="month" value="{{ month }}">
+                <button class="text-dim hover:text-danger text-xs">✕</button>
+              </form>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="4" class="px-4 py-8 text-center text-dim">No entries this month.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <!-- Paste the month as text -->
+    <div class="glass rounded-2xl p-5 border border-white/10">
+      <div class="text-sm font-semibold mb-1">Paste this month</div>
+      <p class="text-xs text-dim mb-3">Paste your notes (bullets <span class="font-mono">-</span> <span class="font-mono">•</span> <span class="font-mono">*</span>) and the arithmetic is worked out for you.
+        Example: <span class="font-mono text-dim">- Groceries: 15-1+3</span> → 17. Default kind: expense. You preview before saving.</p>
+      <form method="post" action="/expenses/import/preview" class="space-y-2">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="year" value="{{ year }}"><input type="hidden" name="month" value="{{ month }}">
+        <textarea name="text" rows="6" placeholder="{{ month|month }}&#10;- Expense: Groceries: 8.53+1+26.25&#10;- Income: Salary: 1200"
+          class="w-full bg-panel2 border border-white/10 rounded-lg px-3 py-2 text-sm font-mono"></textarea>
+        <button class="bg-accent2 text-white font-semibold rounded-lg px-4 py-2 text-sm hover:brightness-110">Preview →</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div class="space-y-4">
+    <div class="glass rounded-2xl p-5 border border-white/10"><div class="text-sm font-semibold mb-3">Expenses by category</div><div class="relative h-56"><canvas id="cg"></canvas></div></div>
+    <div class="glass rounded-2xl p-5 border border-white/10"><div class="text-sm font-semibold mb-3">Income by category</div><div class="relative h-56"><canvas id="ci"></canvas></div></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const G = {{ chart_expenses|tojson }}, I = {{ chart_incomes|tojson }};
+  Chart.defaults.color = '#8aa0b2';
+  const pal = ['#ff4d6d','#ffb703','#7c5cff','#4dabf7','#f783ac','#00e5ff','#63e6be','#b197fc','#ffa94d'];
+  const palG = ['#00ff95','#00e5ff','#63e6be','#4dabf7','#b2f2bb'];
+  if (G.labels.length) new Chart(cg, {type:'doughnut', data:{labels:G.labels, datasets:[{data:G.data, backgroundColor:pal}]}, options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom'}}}});
+  if (I.labels.length) new Chart(ci, {type:'doughnut', data:{labels:I.labels, datasets:[{data:I.data, backgroundColor:palG}]}, options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom'}}}});
+</script>
+{% endblock %}

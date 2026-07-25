@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Import preview · Expenses{% endblock %}
+{% block header %}Import preview{% endblock %}
+{% block content %}
+
+{% if ignored %}
+<div class="mb-4 text-sm text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-3">
+  <div class="font-semibold mb-1">⚠ {{ ignored|length }} line(s) could not be read and will be skipped:</div>
+  {% for l in ignored %}<div class="font-mono text-xs text-amber-200/80 truncate">{{ l }}</div>{% endfor %}
+  <div class="text-xs text-amber-200/60 mt-1">Expected format: <span class="font-mono">- Expense: Category: 8.53+1+26.25</span></div>
+</div>
+{% endif %}
+
+{% if rows %}
+<form method="post" action="/expenses/import/save">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="year" value="{{ year }}">
+  <input type="hidden" name="n" value="{{ rows|length }}">
+
+  <div class="flex flex-wrap items-center gap-3 mb-4">
+    <label class="text-sm text-dim">Import into month:</label>
+    <select name="month" class="bg-panel2 border border-white/10 rounded-lg px-3 py-2 text-sm">
+      {% for m in range(1, 13) %}
+      <option value="{{ m }}" {{ 'selected' if m == month }}>{{ m|month }} {{ year }}</option>
+      {% endfor %}
+    </select>
+    <span class="text-xs text-dim">{{ rows|length }} entries detected</span>
+  </div>
+
+  <div class="glass rounded-2xl border border-white/10 overflow-hidden mb-4">
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm whitespace-nowrap">
+        <thead class="text-dim text-xs uppercase border-b border-white/10"><tr>
+          <th class="text-center px-3 py-3">Include</th>
+          <th class="text-left px-4 py-3">Kind</th>
+          <th class="text-left px-4 py-3">Category</th>
+          <th class="text-right px-4 py-3">Amount</th>
+        </tr></thead>
+        <tbody>
+          {% for it in rows %}
+          <tr class="border-b border-white/5">
+            <td class="px-3 py-2.5 text-center">
+              <input type="checkbox" name="include_{{ loop.index0 }}" checked>
+            </td>
+            <td class="px-4 py-2.5">
+              <select name="kind_{{ loop.index0 }}" class="bg-panel2 border border-white/10 rounded-lg px-2 py-1.5 text-sm">
+                <option value="expense" {{ 'selected' if it.kind == 'expense' }}>Expense</option>
+                <option value="income" {{ 'selected' if it.kind == 'income' }}>Income</option>
+              </select>
+            </td>
+            <td class="px-4 py-2.5">
+              <input name="category_{{ loop.index0 }}" value="{{ it.category }}"
+                     class="w-full sm:w-56 bg-panel2 border border-white/10 rounded-lg px-2 py-1.5 text-sm">
+            </td>
+            <td class="px-4 py-2.5 text-right">
+              <input name="amount_{{ loop.index0 }}" value="{{ '%.2f'|format(it.amount) }}"
+                     class="w-28 bg-panel2 border border-white/10 rounded-lg px-2 py-1.5 text-sm text-right font-mono">
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <p class="text-xs text-dim mb-2">
+    <b>Append</b>: adds to what is already in {{ month|month }} {{ year }}.
+    <b>Replace</b>: deletes that whole month and keeps only these rows.
+  </p>
+  <div class="flex flex-wrap gap-3">
+    <button name="mode" value="append"
+            class="bg-accent text-bg font-semibold rounded-lg px-6 py-2.5 hover:brightness-110">➕ Append</button>
+    <button name="mode" value="replace"
+            onclick="return confirm('This DELETES every entry in {{ month|month }} {{ year }} and replaces them with these. Continue?')"
+            class="bg-danger text-white font-semibold rounded-lg px-6 py-2.5 hover:brightness-110">♻ Replace the month</button>
+    <a href="/expenses?year={{ year }}&month={{ month }}" class="text-dim hover:text-white px-4 py-2.5 text-sm">Cancel</a>
+  </div>
+</form>
+{% else %}
+<div class="glass rounded-2xl border border-white/10 px-5 py-6 text-sm text-dim">
+  No entries were detected in the pasted text.
+  <a href="/expenses?year={{ year }}&month={{ month }}" class="text-accent">← Back</a>
+</div>
+{% endif %}
+{% endblock %}

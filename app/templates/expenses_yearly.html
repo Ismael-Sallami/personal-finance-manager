@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Yearly summary {{ year }}{% endblock %}
+{% block header %}Yearly summary · {{ year }}{% endblock %}
+{% block content %}
+<div class="flex items-center gap-3 mb-6">
+  <form method="get" action="/expenses/yearly">
+    <select name="year" onchange="this.form.submit()" class="bg-panel2 border border-white/10 rounded-lg px-3 py-2 text-sm">
+      {% for y in years %}<option value="{{ y }}" {{ 'selected' if y==year }}>{{ y }}</option>{% endfor %}
+      {% if year not in years %}<option value="{{ year }}" selected>{{ year }}</option>{% endif %}
+    </select>
+  </form>
+  <a href="/expenses?year={{ year }}" class="text-sm text-accent hover:underline ml-auto">← Monthly view</a>
+</div>
+
+<div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+  <div class="glass rounded-2xl p-5 border border-white/10"><div class="text-xs text-dim">INCOME THIS YEAR</div><div class="text-2xl font-bold text-ok">{{ total_incomes|money }}</div></div>
+  <div class="glass rounded-2xl p-5 border border-white/10"><div class="text-xs text-dim">EXPENSES THIS YEAR</div><div class="text-2xl font-bold text-danger">{{ total_expenses|money }}</div></div>
+  <div class="glass rounded-2xl p-5 border border-white/10"><div class="text-xs text-dim">SAVED</div><div class="text-2xl font-bold {{ 'text-ok' if balance>=0 else 'text-danger' }}">{{ balance|money }}</div></div>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+  <div class="glass rounded-2xl p-5 border border-white/10 lg:col-span-2"><div class="text-sm font-semibold mb-3">Expenses vs income by month</div><div class="relative h-64"><canvas id="cm"></canvas></div></div>
+  <div class="glass rounded-2xl p-5 border border-white/10"><div class="text-sm font-semibold mb-3">Expenses by category</div><div class="relative h-64"><canvas id="cc"></canvas></div></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+  Chart.defaults.color = '#8aa0b2';
+  new Chart(cm, {type:'bar', data:{labels: {{ MONTHS[1:]|tojson }},
+    datasets:[{label:'Income', data:{{ months_incomes|tojson }}, backgroundColor:'#00ff95'},
+              {label:'Expenses', data:{{ months_expenses|tojson }}, backgroundColor:'#ff4d6d'}]},
+    options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom'}}}});
+  const C = {{ cat|tojson }};
+  const pal = ['#ff4d6d','#ffb703','#7c5cff','#4dabf7','#f783ac','#00e5ff','#63e6be','#b197fc','#ffa94d','#e599f7'];
+  if (C.labels.length) new Chart(cc, {type:'doughnut', data:{labels:C.labels, datasets:[{data:C.data, backgroundColor:pal}]}, options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom'}}}});
+</script>
+{% endblock %}

@@ -7,7 +7,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.auth import _NotAuthenticated, require_user
 from app.config import APP_ROOT, settings
 from app.models import User
-from app.routers import auth_routes
+from app.routers import auth_routes, expenses
 from app.security import get_csrf_token
 from app.templating import templates
 
@@ -69,6 +69,7 @@ async def _auth_redirect(request: Request, exc: _NotAuthenticated):
 
 
 app.include_router(auth_routes.router)
+app.include_router(expenses.router)
 
 
 @app.get("/")
