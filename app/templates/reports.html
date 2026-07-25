@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Reports{% endblock %}
+{% block header %}Reports and exports{% endblock %}
+{% block content %}
+<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+
+  <div class="glass rounded-2xl p-6 border border-white/10">
+    <div class="text-3xl mb-3">📊</div>
+    <div class="font-semibold mb-1">Monthly Excel</div>
+    <p class="text-dim text-sm mb-4">Expenses, income and balance of the chosen month.</p>
+    <form method="get" action="/reports/excel/monthly" class="flex flex-wrap gap-2">
+      <select name="month" class="bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm">
+        {% for m in range(1,13) %}<option value="{{ m }}" {{ 'selected' if m==month }}>{{ m|month }}</option>{% endfor %}
+      </select>
+      <input name="year" type="number" value="{{ year }}" class="w-20 bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm">
+      <button class="bg-accent text-bg font-semibold rounded-lg px-4 py-2 text-sm hover:brightness-110">Download</button>
+    </form>
+  </div>
+
+  <div class="glass rounded-2xl p-6 border border-white/10">
+    <div class="text-3xl mb-3">📈</div>
+    <div class="font-semibold mb-1">Yearly Excel</div>
+    <p class="text-dim text-sm mb-4">Summary by month and by category.</p>
+    <form method="get" action="/reports/excel/yearly" class="flex flex-wrap gap-2">
+      <input name="year" type="number" value="{{ year }}" class="w-24 bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm">
+      <button class="bg-accent text-bg font-semibold rounded-lg px-4 py-2 text-sm hover:brightness-110">Download</button>
+    </form>
+  </div>
+
+  <div class="glass rounded-2xl p-6 border border-white/10">
+    <div class="text-3xl mb-3">🧾</div>
+    <div class="font-semibold mb-1">Monthly report (PDF)</div>
+    <p class="text-dim text-sm mb-4">Income, expenses, savings and a category doughnut.</p>
+    <form method="get" action="/reports/pdf/monthly" class="flex flex-wrap gap-2">
+      <select name="month" class="bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm">
+        {% for m in range(1,13) %}<option value="{{ m }}" {{ 'selected' if m==month }}>{{ m|month }}</option>{% endfor %}
+      </select>
+      <input name="year" type="number" value="{{ year }}" class="w-20 bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm">
+      <button class="bg-accent2 text-white font-semibold rounded-lg px-4 py-2 text-sm hover:brightness-110">Generate PDF</button>
+    </form>
+  </div>
+
+  <div class="glass rounded-2xl p-6 border border-white/10">
+    <div class="text-3xl mb-3">📅</div>
+    <div class="font-semibold mb-1">Yearly report (PDF)</div>
+    <p class="text-dim text-sm mb-4">Monthly income/expense bars plus categories.</p>
+    <form method="get" action="/reports/pdf/yearly" class="flex flex-wrap gap-2">
+      <input name="year" type="number" value="{{ year }}" class="w-24 bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm">
+      <button class="bg-accent2 text-white font-semibold rounded-lg px-4 py-2 text-sm hover:brightness-110">Generate PDF</button>
+    </form>
+  </div>
+
+  <div class="glass rounded-2xl p-6 border border-white/10">
+    <div class="text-3xl mb-3">📄</div>
+    <div class="font-semibold mb-1">Net worth report (PDF)</div>
+    <p class="text-dim text-sm mb-4">Investments, split, evolution and P&L.</p>
+    <a href="/reports/pdf/net-worth" class="inline-block bg-accent2 text-white font-semibold rounded-lg px-4 py-2 text-sm hover:brightness-110">Generate PDF</a>
+  </div>
+
+</div>
+{% endblock %}

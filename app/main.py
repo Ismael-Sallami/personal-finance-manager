@@ -6,7 +6,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.auth import _NotAuthenticated
 from app.config import APP_ROOT, settings
-from app.routers import auth_routes, banks, dashboard, expenses, investments
+from app.routers import auth_routes, banks, dashboard, expenses, investments, reports
 
 # In production the auto-generated docs are hidden: no need to publish the API
 # schema of a single-user app.
@@ -70,3 +70,4 @@ app.include_router(dashboard.router)
 app.include_router(expenses.router)
 app.include_router(investments.router)
 app.include_router(banks.router)
+app.include_router(reports.router)
