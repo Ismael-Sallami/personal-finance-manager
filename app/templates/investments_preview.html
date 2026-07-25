@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Review statement · Investments{% endblock %}
+{% block header %}Review statement · {{ broker|capitalize }}{% endblock %}
+{% block content %}
+
+{% if warnings %}
+<div class="mb-4 text-sm text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-3">
+  {% for w in warnings %}<div>⚠ {{ w }}</div>{% endfor %}
+</div>
+{% endif %}
+
+{% if positions %}
+<form method="post" action="/investments/save">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="broker" value="{{ broker }}">
+  <input type="hidden" name="filename" value="{{ filename }}">
+  <input type="hidden" name="n" value="{{ positions|length }}">
+
+  <p class="text-xs text-dim mb-3">Check the <b>current value</b> of each position (you can adjust it) and save.
+    Afterwards you can set a Yahoo symbol so the value refreshes on its own.</p>
+
+  <div class="glass rounded-2xl border border-white/10 overflow-hidden mb-4">
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm whitespace-nowrap">
+        <thead class="text-dim text-xs uppercase border-b border-white/10"><tr>
+          <th class="text-left px-4 py-3">Asset</th>
+          <th class="text-right px-4 py-3">Quantity</th>
+          <th class="text-right px-4 py-3">Invested</th>
+          <th class="text-right px-4 py-3">Withdrawn</th>
+          <th class="text-right px-4 py-3">Current value</th>
+          <th class="text-center px-4 py-3">Sold</th>
+        </tr></thead>
+        <tbody>
+          {% for p in positions %}
+          {% set i = loop.index0 %}
+          <tr class="border-b border-white/5">
+            <td class="px-4 py-2.5">
+              <input name="asset_{{ i }}" value="{{ p.asset }}" class="w-44 bg-panel2 border border-white/10 rounded px-2 py-1.5 text-sm">
+              <input type="hidden" name="isin_{{ i }}" value="{{ p.isin or '' }}">
+              <input type="hidden" name="pnl_{{ i }}" value="{{ p.realised_pnl }}">
+            </td>
+            <td class="px-4 py-2.5 text-right"><input name="quantity_{{ i }}" value="{{ p.quantity or 0 }}" class="w-24 bg-panel2 border border-white/10 rounded px-2 py-1.5 text-sm text-right font-mono"></td>
+            <td class="px-4 py-2.5 text-right"><input name="invested_{{ i }}" value="{{ '%.2f'|format(p.invested) }}" class="w-24 bg-panel2 border border-white/10 rounded px-2 py-1.5 text-sm text-right font-mono"></td>
+            <td class="px-4 py-2.5 text-right"><input name="withdrawn_{{ i }}" value="{{ '%.2f'|format(p.withdrawn) }}" class="w-24 bg-panel2 border border-white/10 rounded px-2 py-1.5 text-sm text-right font-mono"></td>
+            <td class="px-4 py-2.5 text-right"><input name="value_{{ i }}" value="{{ '%.2f'|format(p.invested) }}" class="w-24 bg-panel2 border border-white/10 rounded px-2 py-1.5 text-sm text-right font-mono"></td>
+            <td class="px-4 py-2.5 text-center"><input type="checkbox" name="sold_{{ i }}" {{ 'checked' if p.looks_sold }}></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="flex gap-3">
+    <button class="bg-accent text-bg font-semibold rounded-lg px-6 py-2.5 hover:brightness-110">Save positions</button>
+    <a href="/investments" class="text-dim hover:text-white px-4 py-2.5 text-sm">Cancel</a>
+  </div>
+</form>
+{% else %}
+<div class="glass rounded-2xl border border-white/10 px-5 py-6 text-sm text-dim">
+  No positions were detected in the statement.
+  <a href="/investments" class="text-accent">← Back</a>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}Investments{% endblock %}
+{% block header %}Investments · Portfolio{% endblock %}
+{% block content %}
+
+<div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+  <div class="glass rounded-2xl p-5 border border-white/10"><div class="text-xs text-dim">CURRENT VALUE</div><div class="text-2xl font-bold text-accent">{{ totals.value|money }}</div></div>
+  <div class="glass rounded-2xl p-5 border border-white/10"><div class="text-xs text-dim">INVESTED</div><div class="text-2xl font-bold">{{ totals.invested|money }}</div></div>
+  <div class="glass rounded-2xl p-5 border border-white/10"><div class="text-xs text-dim">PROFIT</div><div class="text-2xl font-bold {{ 'text-ok' if totals.profit>=0 else 'text-danger' }}">{{ totals.profit|money }}</div></div>
+</div>
+
+<!-- Add a position by hand -->
+<div class="glass rounded-2xl p-5 border border-white/10 mb-4">
+  <div class="text-sm font-semibold mb-1">➕ Add position</div>
+  <p class="text-xs text-dim mb-3">Keep the <b>accumulated invested</b> amount and today's <b>value</b>; the profit follows.
+    <b>Funds</b> → set the value by hand every few months. <b>ETFs and crypto</b> → tick <b>Auto price</b> and it revalues itself
+    (for crypto, name the asset <span class="font-mono">BTC/EUR</span>).</p>
+  <form method="post" action="/investments/position/add" class="grid grid-cols-2 md:grid-cols-6 gap-2 items-end">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="col-span-2 md:col-span-1">
+      <label class="text-[11px] text-dim">Broker</label>
+      <select name="broker" class="w-full bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm">
+        {% for b in brokers %}<option value="{{ b }}">{{ b|capitalize }}</option>{% endfor %}
+        <option value="other">Other</option>
+      </select>
+    </div>
+    <div class="col-span-2">
+      <label class="text-[11px] text-dim">Asset</label>
+      <input name="asset" required placeholder="iShares Core S&P 500 / BTC/EUR" class="w-full bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm">
+    </div>
+    <div>
+      <label class="text-[11px] text-dim">ISIN</label>
+      <input name="isin" placeholder="IE00B5BMR087" class="w-full bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm font-mono">
+    </div>
+    <div>
+      <label class="text-[11px] text-dim">Yahoo symbol <span class="opacity-60">(opt.)</span></label>
+      <input name="yahoo_symbol" placeholder="SXR8.DE / 0P...F" class="w-full bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm font-mono">
+    </div>
+    <div>
+      <label class="text-[11px] text-dim">Quantity <span class="opacity-60">(opt.)</span></label>
+      <input name="quantity" placeholder="0" class="w-full bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm text-right font-mono">
+    </div>
+    <div>
+      <label class="text-[11px] text-dim" title="Everything you have put in so far; your broker calls it contributed or invested">Invested to date</label>
+      <input name="invested" placeholder="0.00" class="w-full bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm text-right font-mono">
+    </div>
+    <div>
+      <label class="text-[11px] text-dim" title="What it is worth today. Left empty, the invested amount is used.">Current value</label>
+      <input name="current_value" placeholder="0.00" class="w-full bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm text-right font-mono">
+    </div>
+    <div>
+      <label class="text-[11px] text-dim">Monthly contribution</label>
+      <input name="monthly_contribution" placeholder="0.00" class="w-full bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm text-right font-mono">
+    </div>
+    <div class="col-span-2 md:col-span-2 flex items-center gap-2 pb-1">
+      <label class="flex items-center gap-2 text-[11px] text-dim cursor-pointer">
+        <input type="checkbox" name="auto_price" value="on" class="accent-accent">
+        Auto price (ETFs and crypto only)
+      </label>
+    </div>
+    <div class="col-span-2 md:col-span-6">
+      <button class="bg-accent text-bg font-semibold rounded-lg px-5 py-2 text-sm hover:brightness-110">Add</button>
+      <span class="text-[11px] text-dim ml-2">Funds stay manual: leave Auto price off and adjust the value when you edit.</span>
+    </div>
+  </form>
+</div>
+
+<!-- Actions -->
+<div class="flex flex-wrap gap-3 mb-6 items-center">
+  <form method="post" action="/investments/refresh">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="bg-panel2 border border-white/10 rounded-lg px-4 py-2 text-sm hover:border-accent/50">↻ Refresh prices</button>
+  </form>
+  <details class="text-sm">
+    <summary class="cursor-pointer text-dim hover:text-white">or import a CSV/PDF statement…</summary>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-3">
+      {% set labels = {'myinvestor':'MyInvestor (CSV)','traderepublic':'Trade Republic (PDF)','kraken':'Kraken (CSV)'} %}
+      {% for b in brokers %}
+      <form method="post" action="/investments/upload" enctype="multipart/form-data" class="bg-panel2 rounded-xl p-4 border border-white/10">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="broker" value="{{ b }}">
+        <div class="text-sm font-medium mb-2">{{ labels[b] }}</div>
+        <input type="file" name="file" required accept="{{ '.pdf' if b=='traderepublic' else '.csv' }}"
+               class="w-full text-xs text-dim file:mr-2 file:rounded file:border-0 file:bg-accent file:text-bg file:px-3 file:py-1.5 file:font-semibold mb-3">
+        <button class="w-full bg-accent2 text-white rounded-lg py-2 text-sm font-semibold hover:brightness-110">Analyse →</button>
+      </form>
+      {% endfor %}
+    </div>
+  </details>
+</div>
+
+<!-- Positions -->
+{% for broker, items in by_broker.items() %}
+<div class="glass rounded-2xl border border-white/10 mb-4 overflow-hidden">
+  <div class="px-5 py-3 border-b border-white/10 text-sm font-semibold capitalize">{{ broker }}</div>
+  <div class="overflow-x-auto">
+  <table class="w-full text-sm whitespace-nowrap">
+    <thead class="text-dim text-xs uppercase"><tr>
+      <th class="text-left px-5 py-2">Asset</th>
+      <th class="text-right px-5 py-2">Quantity</th>
+      <th class="text-right px-5 py-2">Invested</th>
+      <th class="text-right px-5 py-2">Value</th>
+      <th class="text-right px-5 py-2">Profit</th>
+      <th class="text-left px-5 py-2">Symbol</th>
+      <th class="px-5 py-2"></th>
+    </tr></thead>
+    <tbody>
+      {% for p in items %}
+      {% set ret = (p.profit / p.invested * 100) if p.invested else 0 %}
+      <tr class="border-t border-white/5 align-top">
+        <td class="px-5 py-2.5">{{ p.asset }}{% if p.isin %}<span class="text-dim text-xs"> · {{ p.isin }}</span>{% endif %}
+          {% if p.monthly_contribution and p.monthly_contribution > 0 %}<span class="text-[10px] text-accent ml-1">auto +{{ p.monthly_contribution|money }}/month</span>{% endif %}
+          {% if p.price_updated_at %}<div class="text-[10px] text-dim">price {{ p.current_price }} · {{ p.price_updated_at.strftime('%d/%m %H:%M') }}</div>{% endif %}
+        </td>
+        <td class="px-5 py-2.5 text-right font-mono">{{ p.quantity }}</td>
+        <td class="px-5 py-2.5 text-right font-mono">{{ p.invested|money }}</td>
+        <td class="px-5 py-2.5 text-right font-mono">{{ p.current_value|money }}</td>
+        <td class="px-5 py-2.5 text-right font-mono {{ 'text-ok' if p.profit>=0 else 'text-danger' }}">{{ p.profit|money }}<span class="text-[10px] block">{{ '%+.1f'|format(ret) }} %</span></td>
+        <td class="px-5 py-2.5 font-mono text-xs">{{ p.yahoo_symbol or '—' }}</td>
+        <td class="px-5 py-2.5 text-right">
+          <details class="mb-1">
+            <summary class="cursor-pointer text-accent hover:brightness-110 text-xs list-none">➕ contribute</summary>
+            <form method="post" action="/investments/position/{{ p.id }}/contribute" class="mt-2 grid grid-cols-2 gap-1 text-left bg-panel2 p-3 rounded-lg border border-white/10 w-72">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <div><label class="text-[10px] text-dim">Amount</label><input name="amount" placeholder="100.00" class="w-full bg-bg border border-white/10 rounded px-2 py-1 text-xs font-mono"></div>
+              <div><label class="text-[10px] text-dim">Units <span class="opacity-60">(opt.)</span></label><input name="units" placeholder="0" class="w-full bg-bg border border-white/10 rounded px-2 py-1 text-xs font-mono"></div>
+              <button class="col-span-2 mt-1 bg-accent text-bg font-semibold rounded px-3 py-1.5 text-xs">Contribute</button>
+            </form>
+          </details>
+          <details>
+            <summary class="cursor-pointer text-dim hover:text-accent text-xs list-none">✎ edit</summary>
+            <form method="post" action="/investments/position/{{ p.id }}/edit" class="mt-2 grid grid-cols-2 gap-1 text-left bg-panel2 p-3 rounded-lg border border-white/10 w-72">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <label class="text-[10px] text-dim col-span-2">Asset</label>
+              <input name="asset" value="{{ p.asset }}" class="col-span-2 bg-bg border border-white/10 rounded px-2 py-1 text-xs">
+              <div><label class="text-[10px] text-dim">Quantity</label><input name="quantity" value="{{ p.quantity }}" class="w-full bg-bg border border-white/10 rounded px-2 py-1 text-xs font-mono"></div>
+              <div><label class="text-[10px] text-dim">Invested to date</label><input name="invested" value="{{ '%.2f'|format(p.invested) }}" class="w-full bg-bg border border-white/10 rounded px-2 py-1 text-xs font-mono"></div>
+              <div><label class="text-[10px] text-dim">Value (manual)</label><input name="current_value" value="{{ '%.2f'|format(p.current_value) }}" class="w-full bg-bg border border-white/10 rounded px-2 py-1 text-xs font-mono"></div>
+              <div><label class="text-[10px] text-dim">Monthly contribution</label><input name="monthly_contribution" value="{{ '%.2f'|format(p.monthly_contribution or 0) }}" class="w-full bg-bg border border-white/10 rounded px-2 py-1 text-xs font-mono"></div>
+              <div class="col-span-2"><label class="text-[10px] text-dim">Yahoo symbol</label><input name="yahoo_symbol" value="{{ p.yahoo_symbol or '' }}" class="w-full bg-bg border border-white/10 rounded px-2 py-1 text-xs font-mono"></div>
+              <button class="col-span-2 mt-1 bg-accent text-bg font-semibold rounded px-3 py-1.5 text-xs">Save</button>
+            </form>
+          </details>
+          <form method="post" action="/investments/position/{{ p.id }}/delete" onsubmit="return confirm('Delete {{ p.asset }}?')" class="mt-1">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="text-dim hover:text-danger text-xs">✕ delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% else %}
+<div class="text-dim text-sm">No positions yet. Add one above with its ISIN and you are set.</div>
+{% endfor %}
+{% endblock %}
