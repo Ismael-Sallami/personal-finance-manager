@@ -1,0 +1,84 @@
+\chapter{Lessons}
+
+\section{What the project taught}
+
+The chapters above described decisions in place. This one collects the ones that
+were only obvious afterwards, which are the ones worth passing on.
+
+\subsection{Correctness in money is a type decision}
+
+Choosing \code{Decimal} and \code{NUMERIC} at the start removed a whole class of
+bugs for the life of the project. No test had to check that a total was off by a
+cent, because it cannot be. The equivalent decision made late would have meant
+touching every model, every parser and every report.
+
+\subsection{The interface is not the application}
+
+Making the Telegram bot call the same services as the web pages meant that
+adding a command was a few lines and never a second implementation. The rule
+that route handlers contain no arithmetic is what made that possible, and it is
+cheap to follow from day one and expensive to retrofit.
+
+\subsection{Boot time is a feature}
+
+Nobody thinks about import time until a platform suspends the process. Then
+several seconds of loading pandas and matplotlib become the reason a bot looks
+broken. Moving heavy imports inside functions took an afternoon; a test now
+keeps them there.
+
+\subsection{Choose where to fail loudly}
+
+The project swallows errors in one place and propagates them in another, and
+both are deliberate. A price that cannot be fetched leaves the old value alone,
+because the alternative is a portfolio that stops updating over one delisted
+ticker. A backup that cannot be delivered returns \code{500}, because a backup
+that fails quietly is worse than none.
+
+\subsection{Free tiers are a design constraint}
+
+Sleeping applications and pausing databases are not bugs to work around once;
+they change what the software has to contain. The health endpoints, the split
+between an in-process scheduler and HTTP task endpoints, and the backup that
+lives outside the provider all exist because of that constraint.
+
+\subsection{Error messages should say what to do}
+
+The startup test does not say "assertion failed". It names the modules that were
+loaded and points at the file that shows the correct pattern. Writing that
+message took an extra minute and will save an hour for whoever hits it.
+
+\subsection{Small representation changes remove whole bug families}
+
+Month ranges kept producing boundary errors until a year and a month became one
+integer. After that, a range is two comparisons and there are no special cases
+left to get wrong. When conditions keep multiplying, the representation is
+usually the problem.
+
+\section{What would be done differently}
+
+\begin{itemize}
+  \item \textbf{The content security policy still allows inline scripts},
+        because chart initialisation lives in the templates. Moving that code to
+        static files would let the policy drop \code{'unsafe-inline'}.
+  \item \textbf{The Trade Republic parser depends on a PDF layout} and will
+        break when the format changes. A statement fixture per layout version
+        would turn that break into a failing test instead of a silent
+        misreading.
+  \item \textbf{The login rate limiter lives in memory}, so a restart clears it.
+        Correct for one process, wrong the moment a second one is added.
+  \item \textbf{Migrations were reconstructed rather than translated} for the
+        public repository. That was right here, and it would not be an option
+        for a project with real deployments to upgrade.
+\end{itemize}
+
+\section{Closing}
+
+The project began as five desktop scripts that only worked with one computer
+switched on. It ended as a single application that runs on a small server,
+answers from a phone, keeps its own history, reports on itself, and survives a
+free hosting plan without supervision.
+
+The technical work was not the hard part. The hard parts were deciding what not
+to build, being honest about what fails and how, and making the thing keep
+working when nobody is watching it. Those are the parts this report tried to
+make explicit.

@@ -1,0 +1,175 @@
+\chapter{Testing}
+
+\section{What is worth testing}
+
+The project has around 118 tests, and they are not spread evenly. They
+concentrate on three kinds of code:
+
+\begin{enumerate}
+  \item \textbf{Arithmetic that decides money.} Profit per broker, percentages,
+        the paste parser, aggregation over ranges.
+  \item \textbf{Parsing of external formats.} Broker files that the project does
+        not control and cannot fix.
+  \item \textbf{Contracts that are easy to break by accident.} The health
+        endpoints, the task token, what the backup must never contain.
+\end{enumerate}
+
+There are no tests asserting that a template contains a particular heading.
+Those break on every wording change and catch nothing.
+
+\section{The database fixture}
+
+Most tests run against SQLite in memory, created and destroyed per test:
+
+\begin{lstlisting}[style=py]
+@pytest.fixture
+def db():
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    s = sessionmaker(bind=engine)()
+    try:
+        yield s
+    finally:
+        s.close()
+\end{lstlisting}
+
+Tests that go through \code{TestClient} need one extra detail:
+
+\begin{lstlisting}[style=py]
+engine = create_engine("sqlite:///:memory:",
+                       connect_args={"check_same_thread": False},
+                       poolclass=StaticPool)
+\end{lstlisting}
+
+\code{StaticPool} forces every connection to be the same one. Without it, the
+test client runs the request in another thread, gets a fresh connection, and an
+in-memory database that is empty, because each connection to
+\code{:memory:} is a different database.
+
+\begin{keypoint}[A test failing for the right reason]
+An early version of the security test used the developer's local \code{dev.db}
+by accident. It passed on that machine and failed on a clean clone with
+\code{no such table: users}. The fixture was rewritten to inject an in-memory
+database through \code{dependency\_overrides}, and a comment in the test records
+why.
+\end{keypoint}
+
+\section{Overriding dependencies}
+
+FastAPI dependency injection makes it easy to replace the database and the
+authenticated user:
+
+\begin{lstlisting}[style=py]
+app.dependency_overrides[get_session] = lambda: db
+app.dependency_overrides[require_user] = lambda: user
+monkeypatch.setattr(inv_router, "validate_csrf", lambda *a, **k: True)
+\end{lstlisting}
+
+The CSRF check is patched because these tests exercise the handler logic, not
+the CSRF mechanism, which has its own dedicated tests. Being explicit about that
+split keeps each test focused on one thing.
+
+\section{No network in the test suite}
+
+Three parts of the application talk to the internet: prices, ISIN lookup and
+Telegram. All three are patched at the boundary.
+
+\begin{lstlisting}[style=py]
+monkeypatch.setattr(prices, "fetch_price", lambda s: Decimal("50000"))
+\end{lstlisting}
+
+\begin{lstlisting}[style=py]
+async def fake_send(chat_id, text, reply_markup=None):
+    msgs.append((chat_id, text, reply_markup))
+monkeypatch.setattr(bot, "send_message", fake_send)
+\end{lstlisting}
+
+Capturing the outgoing messages in a list turns "the bot replied correctly" into
+a plain assertion on strings, and the whole suite runs offline in seconds.
+
+\section{Parser tests without private data}
+
+The private version of the project tested the parsers against real statements
+stored outside the repository, and skipped when they were absent. That is
+convenient and useless to anyone else: on any other machine the tests silently
+skip.
+
+The public version builds small synthetic statements inside the test file:
+
+\begin{lstlisting}[style=py]
+KRAKEN_CSV = b"""txid,pair,time,type,ordertype,price,cost,fee,vol
+1,BTC/EUR,2026-01-02,buy,market,40000,400.00,0.4,0.01
+2,BTC/EUR,2026-02-02,buy,market,45000,450.00,0.4,0.01
+3,BTC/EUR,2026-03-02,sell,market,50000,250.00,0.2,0.005
+"""
+
+def test_kraken_nets_buys_and_sells():
+    r = kraken.parse(KRAKEN_CSV)
+    btc = next(p for p in r.positions if p.asset == "BTC/EUR")
+    assert btc.invested == Decimal("600.00")      # 400 + 450 - 250
+    assert btc.quantity == Decimal("0.01500000")
+\end{lstlisting}
+
+The data is fake, the format is real, and the test runs everywhere. It also
+documents the format better than a paragraph would.
+
+\section{The startup test}
+
+One test does not check behaviour, it protects a property that is easy to lose:
+
+\begin{lstlisting}[style=py]
+HEAVY = ["matplotlib", "reportlab", "openpyxl", "pandas", "pdfplumber", "yfinance"]
+
+PROBE = f"""
+import json, sys
+sys.path.insert(0, {str(ROOT)!r})
+import app.main
+print(json.dumps([m for m in {HEAVY!r} if m in sys.modules]))
+"""
+
+def test_boot_does_not_import_heavy_libraries():
+    out = subprocess.run([sys.executable, "-c", PROBE], capture_output=True,
+                         text=True, cwd=ROOT, check=True)
+    loaded = json.loads(out.stdout.strip().splitlines()[-1])
+    assert loaded == [], (
+        f"Importing app.main loads {loaded}. Move those imports inside the "
+        "function that uses them (see app/routers/reports.py).")
+\end{lstlisting}
+
+It runs in a clean subprocess because inside pytest those libraries are already
+loaded by other tests, so checking \code{sys.modules} in-process would always
+fail.
+
+The failure message is as important as the assertion: it names the offending
+modules and points at the fix. A future contributor adding a top-level
+\code{import pandas} gets told exactly what to do instead of wondering why an
+unrelated test broke.
+
+\section{Regression tests carry their reason}
+
+When a bug is fixed, the test that pins it keeps the explanation:
+
+\begin{lstlisting}[style=py]
+def test_donut_drops_negative_slices():
+    """A matplotlib pie raises on slices <= 0; donut has to filter them out."""
+\end{lstlisting}
+
+Six months later, that docstring is the difference between deleting an odd test
+and understanding why it exists.
+
+\section{Continuous integration}
+
+A GitHub Actions workflow runs the suite on every push and pull request:
+
+\begin{lstlisting}[style=sh]
+- uses: actions/setup-python@v5
+  with:
+    python-version: "3.12"
+    cache: pip
+- run: pip install -r requirements.txt
+- run: python -m pytest -q
+\end{lstlisting}
+
+There is no coverage gate and no linter in the pipeline. The suite either passes
+or it does not, which for a project of this size is the check that carries the
+information.

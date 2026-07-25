@@ -1,0 +1,177 @@
+\chapter{Security}
+
+\section{The threat model}
+
+Being honest about the threat model keeps the work proportionate. This
+application is a single-user site, reachable from the public internet, holding
+financial history but no card numbers, no bank credentials and no ability to
+move money.
+
+What it must resist:
+
+\begin{itemize}
+  \item somebody guessing the password;
+  \item somebody reading or forging a session;
+  \item a page on another site making the browser act on the user's behalf;
+  \item a malicious file or a malicious pasted line;
+  \item secrets leaking into the repository.
+\end{itemize}
+
+What it does not try to solve: a compromised machine, a hostile hosting
+provider, or an attacker who already has the database.
+
+\section{Passwords}
+
+The password is hashed with bcrypt:
+
+\begin{lstlisting}[style=py]
+def hash_password(plain: str) -> str:
+    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+def verify_password(plain: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except (ValueError, TypeError):
+        return False
+\end{lstlisting}
+
+bcrypt is deliberately slow and salts every hash, which is what makes a stolen
+database expensive to attack. A general-purpose hash such as SHA-256 is fast,
+and speed is exactly the property an attacker wants.
+
+\code{checkpw} compares in constant time, so the verification does not leak
+information through timing. The \code{except} catches malformed stored values
+and answers "no" rather than raising, which turns a corrupt row into a failed
+login instead of a 500 page.
+
+\section{Sessions}
+
+The session is a signed cookie handled by Starlette's session middleware. It
+holds one thing: the user id.
+
+\begin{lstlisting}[style=py]
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.secret_key,
+    https_only=settings.cookie_secure,
+    same_site="lax",
+    session_cookie="fm_session",
+    max_age=60 * 60 * 12,      # session expires after 12 hours
+)
+\end{lstlisting}
+
+The cookie is signed, not encrypted, so the contents are readable by the user
+but cannot be changed without the key. A user id is not a secret, so that is
+fine.
+
+\code{same\_site="lax"} stops the cookie from being attached to cross-site
+requests, which removes most of the CSRF surface before the token below is even
+considered. \code{https\_only} is tied to configuration so that local
+development over plain HTTP still works, while production sets it to true.
+
+And, as chapter \ref{ch:architecture} showed, production refuses to start with
+the default signing key. A default key published in a public repository would
+let anyone mint a valid session.
+
+\section{CSRF tokens}
+
+Every POST form carries a token that must match one stored in the session:
+
+\begin{lstlisting}[style=py]
+def get_csrf_token(request: Request) -> str:
+    token = request.session.get(CSRF_SESSION_KEY)
+    if not token:
+        token = secrets.token_urlsafe(32)
+        request.session[CSRF_SESSION_KEY] = token
+    return token
+
+def validate_csrf(request: Request, submitted: str | None) -> bool:
+    expected = request.session.get(CSRF_SESSION_KEY)
+    return bool(expected) and bool(submitted) and secrets.compare_digest(expected, submitted)
+\end{lstlisting}
+
+The token is generated on first use and reused for the session, which is simpler
+than rotating it per form and enough given the same-site cookie policy.
+
+Handlers that fail validation redirect instead of raising. A stale tab that
+submits an old token sends the user back to the page rather than to an error.
+
+\section{Slowing down brute force}
+
+The login form is the one endpoint an attacker can hammer. A sliding window per
+IP address limits it:
+
+\begin{lstlisting}[style=py]
+class LoginRateLimiter:
+    def __init__(self, max_attempts: int = 8, window_seconds: int = 900):
+        ...
+    def _prune(self, ip: str, now: float) -> list[float]:
+        recent = [t for t in self._fails.get(ip, []) if now - t < self.window]
+        self._fails[ip] = recent
+        return recent
+\end{lstlisting}
+
+Eight failures in fifteen minutes and the form answers \code{429}. Only failures
+are recorded, so a legitimate user is never affected. The state is a dictionary
+protected by a lock, which is appropriate for a single-process application; a
+restart clears it, and that is an acceptable trade for having no extra service
+to run.
+
+Behind a proxy the socket address is the proxy, so the client address is read
+from \code{X-Forwarded-For} when present.
+
+\section{Response headers}
+
+One middleware sets the same headers on every response:
+
+\begin{lstlisting}[style=py]
+response.headers["X-Content-Type-Options"] = "nosniff"
+response.headers["X-Frame-Options"] = "DENY"
+response.headers["Referrer-Policy"] = "no-referrer"
+response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+response.headers["Content-Security-Policy"] = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; "
+    ...
+    "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'")
+if settings.cookie_secure:
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+\end{lstlisting}
+
+\code{X-Frame-Options: DENY} prevents clickjacking, \code{nosniff} stops content
+type guessing, and the CSP restricts where scripts and styles may come from. The
+policy still allows \code{'unsafe-inline'} for scripts, because the chart
+initialisation lives in the templates; that is the weakest line in the policy and
+the honest place to improve it later.
+
+HSTS is only sent when the deployment is on HTTPS, since sending it from a plain
+HTTP development server would pin the browser to a scheme the server does not
+speak.
+
+\section{Uploads and pasted text}
+
+Statement uploads are limited in three ways: an eight megabyte cap, an accepted
+extension per broker, and a parser that never raises. The size check happens
+after reading, which is acceptable for a single-user application where the only
+uploader is the owner.
+
+The pasted-arithmetic parser described in chapter 4 is a security control as
+much as a convenience: it is the reason a line of text from a phone cannot run
+code.
+
+\section{Secrets and the repository}
+
+The last control is about the repository rather than the code. \code{.env} is
+ignored by git and only \code{.env.example} is committed, with placeholder
+values. Nothing in the source contains a name, an email, an account or a path
+belonging to a real person; every one of those comes from the environment.
+
+The API documentation is hidden when \code{IS\_PROD=true}, which removes a free
+map of the application from anyone who finds the URL.
+
+\begin{keypoint}[The pattern worth copying]
+Each control here is a few lines. What makes them effective is that they are
+applied in one place: one middleware for headers, one function for CSRF, one
+settings object for secrets. Security spread across handlers is security that
+will be forgotten in the next handler.
+\end{keypoint}

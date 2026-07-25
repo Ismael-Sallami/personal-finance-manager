@@ -1,0 +1,205 @@
+\chapter{Publishing a private project}
+\label{ch:going-public}
+
+\section{The exercise}
+
+The application described in the previous chapters runs privately, with real
+financial data. This repository is a second one, public, built from it.
+
+The goal was not to publish a demo. It was to publish the same application,
+adapted so that anybody can run their own instance, with nothing personal left
+anywhere: not in the code, not in the documentation, and not in the commit
+history.
+
+This chapter describes how that was done, because the process is reusable and
+most of its traps are not obvious.
+
+\section{Step one: decide what is personal}
+
+Personal data hides in more places than the obvious ones. The audit found five
+categories.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}p{4.2cm}p{9.5cm}@{}}
+\toprule
+\textbf{Where} & \textbf{What was found} \\
+\midrule
+Configuration & The owner's full name as the default value of a report setting. \\
+Internal documents & Two reports containing the live application URL, the private
+repository link and real transaction counts. \\
+Design notes & An internal specification, signed and dated. \\
+Scripts & An importer that read the author's old desktop project from a
+hardcoded path. \\
+Tests & A test that read the author's real broker statements, and skipped when
+they were absent. \\
+Parsers & A special case with the ISIN of a product the author owns, plus the
+names of real people used as text filters. \\
+\bottomrule
+\end{tabular}
+\caption{What the audit found before publishing.}
+\end{table}
+
+The first four were removed or replaced. The fifth was rewritten as a generic
+pattern, which made the parser both shorter and more capable, as chapter 5
+described.
+
+\begin{keypoint}[The useful question]
+For each file, ask: \emph{would this still make sense on somebody else's
+machine?} A path, a name, an ISIN, a live URL and a count of real records all
+fail that question. It catches more than searching for a name.
+\end{keypoint}
+
+\section{Step two: a fresh history}
+
+The public repository was started with \code{git init}, not by copying the
+private one.
+
+The reason is that git history is data. A repository that was private for months
+carries earlier states of every file, including whatever was committed before a
+name was moved into an environment variable. Removing a secret from the current
+files does nothing if it is still one \code{git log -p} away.
+
+Starting fresh also allowed the history to be rebuilt as a readable narrative:
+thirteen commits, each one a feature that works, in the order somebody would
+actually build them.
+
+\begin{lstlisting}[style=sh]
+chore: bootstrap FastAPI project skeleton
+feat: login with bcrypt, signed session and CSRF
+feat: expenses and income with monthly and yearly views
+feat: broker statement parsers and P&L in Decimal
+feat: bank accounts and net worth snapshots
+feat: investment positions, price refresh and ISIN lookup
+feat: dashboard with net worth, cashflow and category charts
+feat: Excel and PDF reports
+feat: Telegram bot to log expenses and pull reports
+feat: scheduled tasks, health checks and backups over Telegram
+chore: initial Alembic migration
+build: Docker image, compose stack and deploy blueprints
+docs: README, architecture and deployment guides
+\end{lstlisting}
+
+Building the history that way exposed a dependency problem. The application
+object in \file{app/main.py} grows with every feature, so committing the final
+version early would reference routers that did not exist yet, and committing it
+late would leave several commits unable to start.
+
+The solution was to reconstruct the intermediate versions: each commit contains
+the \file{main.py} that matches the code around it. It costs a few minutes and
+produces a history where every commit is a working application.
+
+\section{Step three: the translation}
+
+The private application was written in Spanish: comments, docstrings, variable
+names, database columns, routes and interface text. A public repository in one
+language and one alphabet is easier for everyone, so everything was translated to
+English.
+
+The scale is worth knowing before starting: about seven thousand lines of Python
+and eight hundred of templates.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}p{6.4cm}p{7.3cm}@{}}
+\toprule
+\textbf{Before} & \textbf{After} \\
+\midrule
+\code{/gastos}, \code{/inversiones}, \code{/bancos} & \code{/expenses},
+\code{/investments}, \code{/banks} \\
+\code{importe}, \code{categoria}, \code{tipo} & \code{amount},
+\code{category}, \code{kind} \\
+\code{valor\_actual}, \code{beneficio}, \code{saldo} & \code{current\_value},
+\code{profit}, \code{balance} \\
+\code{patrimonio\_snapshots} & \code{net\_worth\_snapshots} \\
+\code{"gasto"}, \code{"ingreso"} (stored values) & \code{"expense"},
+\code{"income"} \\
+\code{/resumen}, \code{/ahorro} (bot) & \code{/summary}, \code{/savings} \\
+\bottomrule
+\end{tabular}
+\caption{Part of the renaming map.}
+\end{table}
+
+Two lessons came out of it.
+
+\textbf{Write the map first.} Deciding every rename up front, in a table, turns
+the work into mechanical application. Deciding name by name while editing
+produces \code{current\_value} in one file and \code{value\_now} in another.
+
+\textbf{Rename the stored values too, not just the columns.} The kind column
+held the strings \emph{gasto} and \emph{ingreso}. Renaming the column and leaving
+the values would have produced a database that reads half in each language, and
+every comparison in the code would have kept a Spanish string literal in it.
+
+\section{Step four: collapse the migrations}
+
+The private repository had three Alembic revisions, describing a history that
+included a table for a shared property that no longer exists.
+
+A public repository has no deployment to upgrade, so those three were replaced
+by a single initial revision generated from the translated models. The check
+that it is correct is two commands:
+
+\begin{lstlisting}[style=sh]
+alembic upgrade head     # builds the schema from scratch
+alembic check            # no difference between models and database
+\end{lstlisting}
+
+\code{alembic check} answering "no new upgrade operations detected" is the proof
+that the migration and the models agree.
+
+\section{Step five: rewrite the documentation}
+
+The private repository had a stale README describing two features that had been
+removed months earlier, plus two long internal reports full of live URLs.
+
+None of it was reused. The public repository got a README written against the
+application as it is today, and two generic guides: an architecture document and
+a deployment guide. The internal reports were not adapted; they were replaced,
+because a document written for one person and one server does not become general
+by deleting the addresses.
+
+\section{Step six: verify, do not assume}
+
+Three checks ran before the repository was considered done.
+
+\textbf{The whole suite.} 118 tests, all passing, after the renaming. A
+translation this wide is exactly the kind of change that breaks something
+quietly.
+
+\textbf{The application, actually running.} Not just imports: boot the server,
+log in, add an expense, see it on the page, download a PDF and a spreadsheet,
+and check that every page answers 200.
+
+\begin{lstlisting}[style=sh]
+curl -s localhost:8011/health                    # {"status":"ok",...}
+curl -s -o /dev/null -w '%{http_code}' localhost:8011/       # 303 -> /login
+# after logging in: /expenses, /investments, /banks, /reports  -> 200
+# report download                                              -> 200 application/pdf
+\end{lstlisting}
+
+\textbf{A final search for anything personal.} One \code{grep} over the whole
+repository for names, old route words, old domain names and old table names. The
+only remaining hits should be the ones that are supposed to be there: the
+repository URL and the copyright line of the licence.
+
+\begin{pitfall}[The one that nearly went wrong]
+The default SSH key on the machine authenticated as a different GitHub account,
+which had no access to the target one. The first push would have failed with a
+confusing "repository not found". Checking \code{ssh -T} and configuring a host
+alias took two minutes; debugging it later, with a repository half pushed, would
+have taken longer.
+\end{pitfall}
+
+\section{A checklist}
+
+\begin{enumerate}
+  \item Audit for anything that only makes sense on your machine.
+  \item Start a new repository; never publish a history that was private.
+  \item Write the renaming map before renaming anything.
+  \item Collapse migrations into one initial revision.
+  \item Rewrite the documentation for a stranger, do not adapt internal notes.
+  \item Rebuild the history as commits that each work.
+  \item Run the tests, run the application, then grep for what should not be
+        there.
+\end{enumerate}

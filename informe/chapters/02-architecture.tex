@@ -1,0 +1,190 @@
+\chapter{Architecture}
+\label{ch:architecture}
+
+\section{The shape of the application}
+
+The application is a server-rendered web application. There is no separate
+front-end project and no JSON API between the pages and the database. A browser
+asks for a page, FastAPI runs a handler, the handler calls a service, and the
+service returns plain data that a Jinja template renders.
+
+\begin{figure}[h]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  node distance=8mm,
+  box/.style={draw=accent!60, fill=accent!5, rounded corners=2pt,
+              minimum height=9mm, minimum width=26mm, align=center, font=\small},
+  wide/.style={box, minimum width=38mm},
+  arrow/.style={-{Latex[length=2mm]}, accent2, thick}
+]
+\node[box] (browser) {Browser};
+\node[box, below=of browser] (tg) {Telegram};
+\node[wide, right=18mm of browser] (routers) {FastAPI routers\\\scriptsize\code{app/routers/}};
+\node[wide, right=18mm of tg] (bot) {Bot dispatcher\\\scriptsize\code{services/bot.py}};
+\node[wide, right=16mm of routers, yshift=-9mm] (services) {Services\\\scriptsize parsers, pnl, aggregation,\\\scriptsize prices, reports, backup};
+\node[box, right=16mm of services] (orm) {SQLAlchemy};
+\node[box, below=of orm] (db) {Postgres\\\scriptsize or SQLite};
+
+\draw[arrow] (browser) -- (routers);
+\draw[arrow] (tg) -- (bot);
+\draw[arrow] (routers) -- (services);
+\draw[arrow] (bot) -- (services);
+\draw[arrow] (services) -- (orm);
+\draw[arrow] (orm) -- (db);
+\end{tikzpicture}}
+\caption{Both entry points, the web pages and the bot, share the same services.}
+\end{figure}
+
+The important line in that diagram is the one from the bot into the services.
+The bot is not a second implementation of the application; it is a second
+interface to the same functions. When a total changes, it changes in one place
+and every interface follows.
+
+\section{Directory layout}
+
+\begin{lstlisting}[style=sh]
+app/
+  main.py         application object, middleware, lifespan, health
+  config.py       settings read from the environment
+  db.py           engine and session factory
+  models.py       ORM models
+  auth.py         login, logout, route guard
+  security.py     password hashing, CSRF, login rate limit
+  templating.py   shared Jinja instance and filters
+  format.py       money and percentage formatting
+  scheduler.py    in-process scheduled jobs
+  routers/        one module per section of the site
+  services/       every rule that decides a number
+  templates/      Jinja pages
+  static/         compiled CSS
+migrations/       Alembic
+scripts/          seed.py, backup.py
+tests/
+\end{lstlisting}
+
+\section{The rule that keeps it tidy}
+
+Route handlers do four things and nothing else: read the form, check the CSRF
+token, call a service, and redirect or render. They never contain arithmetic.
+
+The reason is not style. The Telegram bot and the PDF generator do not go
+through routers at all, so any calculation written inside a handler would be
+invisible to them and would eventually be duplicated. Duplicated arithmetic on
+money drifts, and drifting numbers are hard to notice and harder to trust.
+
+\begin{keypoint}[Where logic lives]
+If a piece of code decides an amount, a total, a percentage or a category, it
+belongs in \file{app/services/}. If it decides a redirect or an HTTP status, it
+belongs in \file{app/routers/}.
+\end{keypoint}
+
+\section{The service modules}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}p{4.2cm}p{9.5cm}@{}}
+\toprule
+\textbf{Module} & \textbf{Responsibility} \\
+\midrule
+\code{parsers/} & Turn a broker file into a list of positions. One module per
+broker, plus a dispatcher. \\
+\code{pnl.py} & Profit of a position. The formula depends on the broker. \\
+\code{aggregation.py} & Every total the application shows: KPIs, chart series,
+net worth snapshots. \\
+\code{prices.py} & Market prices, and the mapping from a crypto pair to a
+ticker. \\
+\code{symbol\_lookup.py} & From an ISIN to a market symbol, with a cache. \\
+\code{contributions.py} & One-off and monthly contributions. \\
+\code{expenses\_parse.py} & The paste parser and its safe arithmetic. \\
+\code{reports/} & Excel, PDF and the charts embedded in them. \\
+\code{bot.py} & Telegram: dispatch, replies, keyboards, confirmation. \\
+\code{backup.py} & Database dump and delivery. \\
+\bottomrule
+\end{tabular}
+\caption{The service layer.}
+\end{table}
+
+\section{Configuration}
+
+All configuration is read once, at import time, into a single settings object
+built with \code{pydantic-settings}:
+
+\begin{lstlisting}[style=py]
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=APP_ROOT / ".env", extra="ignore")
+
+    database_url: str = ""          # empty -> local SQLite
+    secret_key: str = "dev-insecure-change-me"
+    cookie_secure: bool = False
+    is_prod: bool = False
+    report_owner: str = "Account owner"
+    currency_symbol: str = "€"
+    ...
+
+    @property
+    def sqlalchemy_url(self) -> str:
+        if self.database_url.strip():
+            return self.database_url.strip()
+        return f"sqlite:///{APP_ROOT / 'dev.db'}"
+\end{lstlisting}
+
+Two properties matter more than the rest. \code{sqlalchemy\_url} makes SQLite
+the default, so a fresh clone runs with no database to install. And
+\code{telegram\_enabled} is simply whether a token was provided, which is what
+decides at boot whether the bot router is mounted at all.
+
+\begin{keypoint}[Optional features are optional]
+The bot, the scheduler and the task endpoints are all disabled by an empty
+value: no token, no bot; no \code{TASKS\_TOKEN}, no task endpoints. A user who
+only wants the web pages never has to switch anything off.
+\end{keypoint}
+
+\section{The application lifespan}
+
+FastAPI runs a lifespan function on startup and shutdown. Three things happen
+there:
+
+\begin{lstlisting}[style=py]
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if settings.is_prod and settings.secret_key == "dev-insecure-change-me":
+        raise RuntimeError("SECRET_KEY is not configured in production.")
+    scheduler = None
+    if settings.use_scheduler:
+        from app.scheduler import start_scheduler
+        scheduler = start_scheduler()
+    if settings.telegram_enabled:
+        from app.services.bot import setup_webhook
+        await setup_webhook()
+    yield
+    if scheduler:
+        scheduler.shutdown(wait=False)
+\end{lstlisting}
+
+The first check refuses to boot a production instance with the default signing
+key. A known key means any visitor can forge a session cookie, so failing to
+start is the correct response, not a warning in a log nobody reads.
+
+The webhook registration is repeated on every boot on purpose. It is idempotent,
+and it means a redeploy is enough to recover a bot that lost its webhook.
+
+\section{Two health endpoints, on purpose}
+
+The application exposes \code{/health} and \code{/health/db}, and they are not
+interchangeable.
+
+\begin{itemize}
+  \item \code{/health} answers always and never touches the database. It is the
+        liveness check for the hosting platform.
+  \item \code{/health/db} runs \code{SELECT 1} and answers \code{503} when the
+        database does not reply. It is the readiness check for an external
+        monitor.
+\end{itemize}
+
+\begin{pitfall}[Why not one endpoint]
+If the platform healthcheck queried the database, a brief database outage would
+make the platform consider the application unhealthy and tear the deployment
+down. The application would then be gone even after the database came back. The
+split keeps a database problem a database problem.
+\end{pitfall}

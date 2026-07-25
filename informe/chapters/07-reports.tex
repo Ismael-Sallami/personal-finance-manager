@@ -1,0 +1,124 @@
+\chapter{Reports}
+\label{ch:reports}
+
+\section{Why reports at all}
+
+A dashboard answers questions while the user is looking at it. A report is
+something that can be filed, sent, or read a year later. The application
+produces both formats people actually use: Excel for anyone who wants to poke at
+the numbers, and PDF for anything that gets read rather than edited.
+
+\section{Excel}
+
+The Excel export is built with \code{openpyxl}. All the styling lives in one
+function, so every sheet looks the same:
+
+\begin{lstlisting}[style=py]
+def _write_sheet(ws, headers: list[str], rows: list[list]) -> None:
+    for c, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=c, value=h)
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+    for r, row in enumerate(rows, 2):
+        for c, val in enumerate(row, 1):
+            cell = ws.cell(row=r, column=c, value=val)
+            if r % 2 == 0:
+                cell.fill = _ALT_FILL
+            if isinstance(val, (int, float, Decimal)) and c > 1:
+                cell.number_format = _money_format()
+    for col in ws.columns:
+        width = max((len(str(c.value)) for c in col if c.value is not None), default=8)
+        ws.column_dimensions[get_column_letter(col[0].column)].width = width + 4
+\end{lstlisting}
+
+Two details matter. Amounts are written as numbers with a currency number
+format, not as pre-formatted strings, so the spreadsheet can still sum them. And
+the column width is computed from the longest value, which removes the usual
+first action of every reader, widening the columns by hand.
+
+\section{PDF}
+
+The PDF reports use \code{reportlab} for the document and \code{matplotlib} for
+the charts, which are rendered to PNG in memory and embedded.
+
+\begin{lstlisting}[style=py]
+def _save(fig) -> bytes:
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+\end{lstlisting}
+
+Nothing touches the filesystem. The chart exists as bytes, goes into the
+document, and disappears. On a hosting platform with a read-only or temporary
+filesystem that is the only approach that works, and it avoids leaving files
+behind after a failed request.
+
+The \code{Agg} backend is selected explicitly before importing pyplot, because
+the default backend expects a display that a server does not have.
+
+Four reports are available: monthly, yearly, any range of months, and a detailed
+one that breaks down net worth position by position and account by account.
+
+\section{A bug worth keeping}
+
+The first version of the doughnut chart crashed on a real month. The cause was a
+category with a negative total, produced by a refund recorded as a negative
+expense.
+
+\code{matplotlib.pie} raises on slices that are zero or negative, which is
+reasonable: a pie chart of a negative share has no meaning. The fix filters the
+data for the chart while leaving the tables untouched:
+
+\begin{lstlisting}[style=py]
+pairs = [(l, float(v)) for l, v in zip(labels, data) if v and float(v) > 0]
+if not pairs:
+    ax.text(0.5, 0.5, "No data", ha="center", va="center")
+    ax.axis("off")
+    return _save(fig)
+\end{lstlisting}
+
+\begin{keypoint}[What the fix teaches]
+The chart hides what it cannot draw; the report still shows it in the table
+below. Dropping the row entirely would have been a data loss disguised as a
+rendering fix. A regression test now generates a report from a month containing a
+negative category.
+\end{keypoint}
+
+\section{Percentages that do not lie}
+
+Formatting percentages sounds trivial until a real number rounds badly. A return
+of 0.4\% displayed with zero decimals becomes \code{0\%}, which reads as "this
+investment did nothing" when in fact it did something small.
+
+\begin{lstlisting}[style=py]
+def pct(value, decimals: int = 0, zero_decimals: int = 3) -> str:
+    v = float(value or 0)
+    d = zero_decimals if (v != 0 and round(v, decimals) == 0) else decimals
+    return f"{v:.{d}f}%"
+\end{lstlisting}
+
+A real zero still prints as \code{0\%}. A value that only rounds to zero gets
+extra precision instead. The rule is one line and it removes an entire class of
+misleading output.
+
+\section{Lazy imports, again}
+
+The reports module pulls in the four heaviest dependencies in the project.
+They are imported inside each handler, never at module level:
+
+\begin{lstlisting}[style=py]
+@router.get("/pdf/monthly")
+def pdf_monthly(year: int, month: int, ...):
+    from app.services.reports import generate
+    return _pdf(generate.monthly_pdf(db, year, month), f"Report_{MONTHS[month]}_{year}.pdf")
+\end{lstlisting}
+
+The cost of an import inside a function is one dictionary lookup after the first
+call, since Python caches modules in \code{sys.modules}. The benefit is several
+seconds off every cold start, which chapter \ref{ch:operations} shows to be the
+difference between a working bot and a silent one.
+
+A test enforces the rule so it cannot rot. It runs a clean subprocess, imports
+\code{app.main}, and asserts that none of the heavy modules ended up loaded.

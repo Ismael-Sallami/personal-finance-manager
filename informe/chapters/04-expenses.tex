@@ -1,0 +1,199 @@
+\chapter{Expenses and income}
+
+\section{The problem with data entry}
+
+Recording expenses is not a technical problem, it is a habit problem. Any
+application that asks for six fields per coffee gets abandoned in a week.
+
+The user of this application already had a habit: writing the month's expenses
+in the notes app of a phone, as a list with bullets, sometimes with small sums
+written out because three purchases went into the same category.
+
+\begin{lstlisting}[style=sh]
+June
+- Expense: Groceries: 15-1+3
+- Income: Salary: 1200
+- Food: 8.53+1+26.25
+- Transport: (10+5)*2
+\end{lstlisting}
+
+Rather than replace that habit, the application reads it. The user pastes the
+text, and the parser turns it into rows.
+
+\section{Parsing a pasted block}
+
+The parser lives in \file{app/services/expenses\_parse.py} and works in three
+steps.
+
+\begin{enumerate}
+  \item \textbf{Find the month.} If the first non-empty line is a month name and
+        contains no colon, it is the title and it sets the month.
+  \item \textbf{Clean each line.} A regular expression removes leading bullets:
+        \code{-}, \code{*}, \code{\textbullet}, and a few others that phones
+        insert.
+  \item \textbf{Split by colon.} The last field is the arithmetic expression,
+        everything before it is a label. If the first label is a kind
+        (\emph{Expense} or \emph{Income}) it sets the kind, otherwise it is part
+        of the category.
+\end{enumerate}
+
+Lines that do not fit come back in an \code{ignored} list instead of being
+dropped in silence. The preview shows them, so a typo is visible rather than
+mysterious.
+
+\begin{lstlisting}[style=py]
+@dataclass
+class ParsedItem:
+    kind: str          # expense | income
+    category: str
+    amount: Decimal
+    note: str | None = None
+
+@dataclass
+class ParsedExpenses:
+    title: str
+    month: int | None
+    items: list[ParsedItem]
+    ignored: list[str] = field(default_factory=list)
+\end{lstlisting}
+
+\section{Evaluating arithmetic without eval}
+
+A line can contain \code{15-1+3} or \code{(10+5)*2}. The obvious way to evaluate
+that is \code{eval()}, and it is the wrong way: \code{eval} on text that came
+from outside runs whatever that text says.
+
+The parser uses Python's own \code{ast} module instead. The expression is parsed
+into a syntax tree, and the tree is walked by a function that accepts only
+numbers, unary signs, and six binary operators.
+
+\begin{lstlisting}[style=py]
+_BINOPS = {ast.Add: operator.add, ast.Sub: operator.sub,
+           ast.Mult: operator.mul, ast.Div: operator.truediv,
+           ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod}
+
+def _eval_node(node: ast.AST) -> float:
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+            raise ExprError("numbers only")
+        return float(node.value)
+    if isinstance(node, ast.BinOp):
+        op = _BINOPS.get(type(node.op))
+        if op is None:
+            raise ExprError("operator not allowed")     # ** lands here
+        left, right = _eval_node(node.left), _eval_node(node.right)
+        if op in (operator.truediv, operator.floordiv, operator.mod) and right == 0:
+            raise ExprError("division by zero")
+        return op(left, right)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        val = _eval_node(node.operand)
+        return val if isinstance(node.op, ast.UAdd) else -val
+    raise ExprError("expression not allowed")
+\end{lstlisting}
+
+Anything the walker does not recognise raises. A name, a function call, an
+attribute or a subscript never reaches an evaluation branch, because there is no
+branch for them.
+
+\begin{pitfall}[Why exponentiation is blocked]
+\code{**} is arithmetic and would fit the theme, but \code{2**9999999} is a
+denial of service in eleven characters: it is a legal expression that takes a
+long time and a lot of memory. It is left out of the operator table, and the
+input is capped at 120 characters as a second line of defence.
+\end{pitfall}
+
+Two more guards run before parsing: the expression must match a character
+allowlist (digits, spaces, \code{. , + - * / \% ( )}), and a comma is normalised
+to a dot so that both decimal conventions work.
+
+\section{The preview step}
+
+Parsing produces a preview page, not database rows. The preview shows each
+detected line with an editable category, an editable amount, a kind selector and
+a checkbox, plus the list of ignored lines.
+
+Saving offers two buttons, and the difference between them matters:
+
+\begin{itemize}
+  \item \textbf{Append} adds the rows to whatever the month already contains.
+  \item \textbf{Replace} deletes every row of that month first.
+\end{itemize}
+
+Replace exists because the realistic workflow is pasting a month, noticing a
+mistake, fixing the text and pasting again. Without it, the second paste would
+double the month. It asks for confirmation in the browser, since it destroys
+data.
+
+\begin{lstlisting}[style=py]
+if mode == "replace":
+    db.execute(sql_delete(Transaction).where(
+        Transaction.year == year, Transaction.month == month))
+\end{lstlisting}
+
+Note the two conditions: the delete is scoped to one month of one year, never to
+the table. A test covers exactly that, by seeding a row in a different month and
+asserting it survives.
+
+\section{Reading amounts from a form}
+
+Users type amounts in whatever convention they are used to. The form parser
+accepts all four common forms:
+
+\begin{lstlisting}[style=py]
+def _parse_amount(raw: str) -> Decimal:
+    s = raw.strip().replace(" ", "")
+    if "," in s and "." in s:
+        # the last separator is the decimal one; the other groups thousands
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    else:
+        s = s.replace(",", ".")
+    try:
+        return Decimal(s).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        return Decimal("0.00")
+\end{lstlisting}
+
+The rule is simple and works for both conventions: whichever separator appears
+last is the decimal separator. \code{1.234,56} and \code{1,234.56} both become
+\code{1234.56}.
+
+An unparseable value becomes zero rather than raising. A form that rejects the
+whole submission because of one bad field is more annoying than a zero the user
+can see and correct.
+
+\section{The two views}
+
+The monthly view lists the entries of one month with totals for income,
+expenses and the balance, plus two doughnut charts by category. The yearly view
+groups by month and shows a bar chart of income against expenses, plus expenses
+by category for the whole year.
+
+Both read through the same aggregation helpers used by the reports and the bot,
+so the number on the page and the number in the PDF come from the same query.
+
+\section{Investing is spending, and also not}
+
+One category needed special treatment. Money moved into an investment leaves the
+current account like an expense, but it is not consumption: it is still part of
+net worth. Counting it as a plain expense makes a good month look terrible.
+
+The application keeps it simple. Such entries are still expenses, but categories
+named \emph{investment}, \emph{investments} or \emph{investing} are also summed
+separately, and every summary adds a line: \emph{of which X was invested}.
+
+\begin{lstlisting}[style=py]
+INVESTMENT_CATEGORIES = {"investment", "investments", "investing"}
+
+def invested_in_period(db, year, month) -> float:
+    cond = [Transaction.year == year, Transaction.kind == "expense",
+            func.lower(Transaction.category).in_(tuple(INVESTMENT_CATEGORIES))]
+    if month:
+        cond.append(Transaction.month == month)
+    return _f(db.scalar(select(func.sum(Transaction.amount)).where(*cond)))
+\end{lstlisting}
+
+The comparison is done in lower case inside the query, so the user can capitalise
+the category however they like.

@@ -1,0 +1,213 @@
+\chapter{The data model}
+
+\section{Seven tables}
+
+The database is small on purpose. Seven tables cover the whole application.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}p{4.4cm}p{9.3cm}@{}}
+\toprule
+\textbf{Table} & \textbf{Holds} \\
+\midrule
+\code{users} & The single account that owns the data. \\
+\code{categories} & Optional catalogue of category names and colours. \\
+\code{transactions} & One expense or one income entry. \\
+\code{broker\_imports} & One row per uploaded statement. \\
+\code{investments} & A valued position, optionally linked to its import. \\
+\code{bank\_accounts} & An account, a savings pot or cash. \\
+\code{net\_worth\_snapshots} & Net worth on a given day. \\
+\bottomrule
+\end{tabular}
+\caption{Tables and what they represent.}
+\end{table}
+
+There is no table of users' preferences, no audit log and no soft deletes. The
+application serves one person; features that only pay off with many users would
+cost complexity and return nothing.
+
+\section{Money is never a float}
+
+Two type aliases are declared once and reused in every model:
+
+\begin{lstlisting}[style=py]
+MONEY = Numeric(14, 2)
+QTY = Numeric(20, 8)
+\end{lstlisting}
+
+\code{MONEY} covers amounts: fourteen digits with two decimals. \code{QTY}
+covers quantities, which need far more decimals because a crypto position can be
+a fraction of a coin.
+
+The reason is the classic one. In binary floating point, \code{0.1 + 0.2} is not
+\code{0.3}. Adding a few hundred expenses that way produces a total that is off
+by cents, and a total that is off by cents cannot be checked against a bank
+statement. Python's \code{Decimal} and SQL's \code{NUMERIC} do exact decimal
+arithmetic, so the total either matches or the data is wrong; the arithmetic
+itself is never in doubt.
+
+\begin{keypoint}[The rule in practice]
+Parsers return \code{Decimal}. The ORM stores \code{NUMERIC}. The backup writes
+decimals as strings, not JSON numbers. Floats appear only in the payloads sent
+to the charting library, where a rounding error is smaller than a pixel.
+\end{keypoint}
+
+\section{Transactions}
+
+\begin{lstlisting}[style=py]
+class Transaction(Base):
+    __tablename__ = "transactions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    date: Mapped[dt.date] = mapped_column(Date, index=True)
+    year: Mapped[int] = mapped_column(Integer, index=True)
+    month: Mapped[int] = mapped_column(Integer, index=True)
+    category: Mapped[str] = mapped_column(String(120), index=True)
+    kind: Mapped[str] = mapped_column(String(10))       # expense | income
+    amount: Mapped[Decimal] = mapped_column(MONEY)
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+\end{lstlisting}
+
+Two choices in that model deserve an explanation.
+
+\subsection{Why year and month are stored separately}
+
+The date is already there, so storing the year and the month again looks like
+duplication. It is, and it is deliberate.
+
+Every view in the application groups by month. Extracting a month from a date
+inside a query means calling a database function, and those functions differ
+between Postgres and SQLite; worse, an index on the date column usually cannot
+be used once the value is wrapped in a function call. Two indexed integer columns
+behave identically on both engines and let the planner use the index.
+
+The cost is that the two representations could disagree. They cannot in practice,
+because every write goes through a handful of functions that set all three
+fields together.
+
+\subsection{Why the category is a string}
+
+There is a \code{categories} table, but transactions store the category name
+directly instead of a foreign key. That means a user can type a new category and
+it simply exists, with no extra step and no dialogue asking to create it first.
+
+The price is that renaming a category later means an update across rows. For a
+single-user application with a few thousand transactions, that trade is clearly
+worth it.
+
+\section{Investments}
+
+\begin{lstlisting}[style=py]
+class Investment(Base):
+    __tablename__ = "investments"
+
+    broker: Mapped[str] = mapped_column(String(30), index=True)
+    asset: Mapped[str] = mapped_column(String(200))
+    isin: Mapped[str | None]
+    quantity: Mapped[Decimal | None] = mapped_column(QTY, nullable=True)
+    invested: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("0"))
+    current_value: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("0"))
+    withdrawn: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("0"))
+    profit: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("0"))
+    valued_on: Mapped[dt.date] = mapped_column(Date, index=True)
+
+    # automatic revaluation
+    yahoo_symbol: Mapped[str | None]
+    current_price: Mapped[Decimal | None] = mapped_column(QTY, nullable=True)
+    price_updated_at: Mapped[dt.datetime | None]
+    auto_value: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    monthly_contribution: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("0"))
+\end{lstlisting}
+
+A row is a position \emph{as valued on a date}, not a position in general. Every
+statement import writes a fresh set of rows with today's \code{valued\_on}, and
+the old rows stay. That gives a free history of the portfolio, and it means an
+import can never destroy earlier data.
+
+The consequence is that reading "the portfolio" means reading, for each broker,
+only the rows of its most recent valuation. That query lives in one function,
+\code{latest\_investments()}, and everything else calls it.
+
+\begin{lstlisting}[style=py]
+def latest_investments(db: Session) -> list[Investment]:
+    rows = []
+    for broker in db.scalars(select(Investment.broker).distinct()).all():
+        max_date = db.scalar(
+            select(func.max(Investment.valued_on)).where(Investment.broker == broker)
+        )
+        rows.extend(db.scalars(select(Investment).where(
+            Investment.broker == broker, Investment.valued_on == max_date)).all())
+    return rows
+\end{lstlisting}
+
+The loop runs per broker rather than once for the whole table because brokers
+are imported on different days. Taking a single global maximum date would hide
+every broker that was not imported most recently.
+
+\section{Bank accounts and net worth snapshots}
+
+Bank accounts are deliberately dumb: a name, a kind, a balance and a timestamp.
+The user updates the balance when convenient; the application never tries to
+connect to a bank.
+
+\code{net\_worth\_snapshots} holds one row per day with three amounts:
+investments, banks and the total. It is written by an upsert, so several changes
+on the same day update the same row.
+
+\begin{lstlisting}[style=py]
+def snapshot_today(db: Session) -> NetWorthSnapshot:
+    inv_value, bank_value = _net_worth_parts(db)
+    today = date.today()
+    snap = db.scalar(select(NetWorthSnapshot).where(NetWorthSnapshot.date == today))
+    if snap is None:
+        snap = NetWorthSnapshot(date=today)
+        db.add(snap)
+    snap.investments = Decimal(str(round(inv_value, 2)))
+    snap.banks = Decimal(str(round(bank_value, 2)))
+    snap.total = snap.investments + snap.banks
+    db.commit()
+    return snap
+\end{lstlisting}
+
+\begin{keypoint}[Why store history instead of computing it]
+Net worth could be recomputed from current values whenever the chart is drawn.
+It would also redraw the past every time a price moved, because the only prices
+available are today's. Storing a snapshot freezes what was true on the day, which
+is the whole point of an evolution chart.
+\end{keypoint}
+
+The snapshot is written after any change that can move net worth: editing an
+investment, contributing to one, editing an account, or the nightly job. Missing
+one of those calls does not corrupt anything, it only leaves a gap in the chart.
+
+\section{Migrations}
+
+Schema changes go through Alembic. The environment file reads the URL and the
+metadata from the application itself, so there is no second copy of the
+connection settings:
+
+\begin{lstlisting}[style=py]
+config.set_main_option("sqlalchemy.url", settings.sqlalchemy_url)
+target_metadata = Base.metadata
+...
+context.configure(connection=connection, target_metadata=target_metadata,
+                  render_as_batch=settings.is_sqlite)
+\end{lstlisting}
+
+\code{render\_as\_batch} matters when developing against SQLite, which cannot
+alter most things in place. In batch mode Alembic creates a new table, copies the
+data and swaps it, which reproduces on SQLite what Postgres does with a plain
+\code{ALTER TABLE}.
+
+The usual cycle is two commands:
+
+\begin{lstlisting}[style=sh]
+alembic revision --autogenerate -m "what changed"
+alembic upgrade head
+\end{lstlisting}
+
+Autogenerate compares the models with the live database and writes the
+difference. It is a starting point, not an oracle: it does not see renames, and
+it does not know how to move data. Every generated file is worth reading before
+it is applied.

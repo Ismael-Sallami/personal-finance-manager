@@ -1,0 +1,290 @@
+\chapter{Investments}
+
+\section{Three brokers, three formats}
+
+The application imports statements from three brokers, and none of them export
+the same thing.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}p{3.2cm}p{2.4cm}p{7.9cm}@{}}
+\toprule
+\textbf{Broker} & \textbf{Format} & \textbf{What the file actually contains} \\
+\midrule
+MyInvestor & CSV & Cash movements of the account. Fund purchases appear as
+negative amounts, redemptions as positive ones. \\
+Kraken & CSV & Individual trades: pair, side, cost and volume. \\
+Trade Republic & PDF & A statement in prose, one transaction per paragraph. \\
+\bottomrule
+\end{tabular}
+\caption{What each export really is.}
+\end{table}
+
+\section{One shape for all of them}
+
+Each parser returns the same two dataclasses, so nothing downstream needs to know
+which broker produced the data.
+
+\begin{lstlisting}[style=py]
+@dataclass
+class Position:
+    asset: str
+    isin: str | None = None
+    quantity: Decimal | None = None
+    invested: Decimal = Decimal("0")
+    withdrawn: Decimal = Decimal("0")
+    realised_pnl: Decimal = Decimal("0")
+    looks_sold: bool = False
+    meta: dict = field(default_factory=dict)
+
+@dataclass
+class ParseResult:
+    broker: str
+    positions: list[Position]
+    warnings: list[str] = field(default_factory=list)
+\end{lstlisting}
+
+The \code{warnings} list is the error channel. A parser never raises on a bad
+file; it returns an empty position list and an explanation. The upload page then
+shows the explanation and the request completes normally. An exception would
+produce a 500 page that tells the user nothing.
+
+\begin{lstlisting}[style=py]
+def parse(broker: str, content: bytes) -> ParseResult:
+    module_path = PARSER_MODULES.get(broker)
+    if module_path is None:
+        return ParseResult(broker, [], [f"Unknown broker: {broker}"])
+    return import_module(module_path).parse(content)
+\end{lstlisting}
+
+The dispatcher imports the parser module by name, at call time. That is not
+laziness for its own sake: the parsers pull in pandas and pdfplumber, which take
+seconds to import, and no user should pay that cost on a request that has
+nothing to do with investments.
+
+\section{Reading each format}
+
+\subsection{MyInvestor}
+
+The export is a cash statement, so the first job is telling fund movements apart
+from transfers, interest and tax withholdings. Two rules do it: a list of words
+that mark a cash movement, and the observation that fund names are printed in
+upper case.
+
+\begin{lstlisting}[style=py]
+def is_fund_row(concept: str) -> bool:
+    c = str(concept).strip()
+    if any(w in c for w in SKIP_WORDS):
+        return False
+    if re.search(r"[a-z]", c):     # fund names are upper case
+        return False
+    return True
+\end{lstlisting}
+
+The remaining rows are grouped by fund. Negative amounts add up to
+\code{invested}, positive ones to \code{withdrawn}. When the two nearly match,
+the position is flagged as probably sold, and the preview shows the flag already
+ticked.
+
+\subsection{Kraken}
+
+The export lists trades, so a position has to be reconstructed. For each pair,
+the parser subtracts sells from buys, in both money and volume.
+
+\begin{lstlisting}[style=py]
+net_invested = buys["cost"].sum() - sells["cost"].sum()
+volume = buys["vol"].sum() - sells["vol"].sum()
+if volume > 1e-7 or abs(net_invested) > 0.01:
+    positions.append(Position(asset=str(pair), ...))
+\end{lstlisting}
+
+The threshold on the volume avoids keeping positions that are only rounding
+dust after everything was sold, while the money condition keeps a pair that is
+closed but still shows a profit or a loss.
+
+\subsection{Trade Republic}
+
+The hardest one. The statement is a PDF written for humans, so the parser
+flattens every page to text, splits it by transaction date, and matches each
+block with regular expressions.
+
+\begin{lstlisting}[style=py]
+ISIN_RE = r"[A-Z]{2}[A-Z0-9]{9}[0-9]"
+
+std = re.search(rf"(Buy|Sell|Savings).*?({ISIN_RE}).*?quantity:\s*([\d\.]+)",
+                desc, re.IGNORECASE)
+\end{lstlisting}
+
+The extraction is fragile by nature; a change in the statement layout will break
+it. Three details make it less fragile than it could be. Header and footer lines
+are removed first. Amounts glued to quantities by the PDF text extraction are
+split again with targeted substitutions. And the ISIN is matched by its actual
+pattern, two country letters, nine alphanumerics and a check digit, rather than
+by a hardcoded list of the products the author happens to own.
+
+\begin{keypoint}[Generic beats specific]
+The original private version had a special case for one particular product, with
+its ISIN written in the source. The public version replaced it with a second,
+looser regular expression that accepts any ISIN followed by a quantity. The
+parser became shorter and covers more cases.
+\end{keypoint}
+
+Trade Republic also allows partial sells, so the parser keeps a running average
+cost per ISIN and realises the profit of each sell:
+
+\begin{lstlisting}[style=py]
+elif "sell" in op:
+    if qty > 1e-6:
+        avg = cost / qty
+        sold_cost = avg * q
+        pnl += total - sold_cost
+        qty -= q
+        cost -= sold_cost
+\end{lstlisting}
+
+That realised profit travels in \code{Position.realised\_pnl} and is added back
+later, because otherwise a profit that was already taken would disappear from
+the totals.
+
+\section{Profit depends on the broker}
+
+Given the three formats above, a single profit formula would be wrong for at
+least two of them. The calculation branches instead:
+
+\begin{lstlisting}[style=py]
+def total_profit(broker, invested, withdrawn, current_value,
+                 realised_pnl=ZERO, sold=False) -> Decimal:
+    if broker == "myinvestor":
+        val_calc = ZERO if (sold and withdrawn > invested * HALF) else current_value
+        return ((val_calc + withdrawn) - invested).quantize(Decimal("0.01"))
+    if broker == "kraken":
+        return (current_value - invested).quantize(Decimal("0.01"))
+    if broker == "traderepublic":
+        return ((current_value - invested) + realised_pnl).quantize(Decimal("0.01"))
+    return ((current_value + withdrawn) - invested + realised_pnl).quantize(Decimal("0.01"))
+\end{lstlisting}
+
+Each branch answers a different question:
+
+\begin{itemize}
+  \item \textbf{MyInvestor} reports redemptions, so money taken out counts. When
+        a fund was sold and most of the money already came back, the current
+        value is ignored, otherwise the same money would be counted twice.
+  \item \textbf{Kraken} nets buys against sells during parsing, so the profit is
+        simply what the position is worth now minus what is still committed.
+  \item \textbf{Trade Republic} already realised part of the profit on partial
+        sells, so it is added to the unrealised part.
+\end{itemize}
+
+Every branch is covered by a test, including the double counting case, which is
+the one that is easy to get wrong and impossible to notice by eye.
+
+\section{Valuation: manual first}
+
+A position needs a current value. Fetching it automatically works well for
+listed products and badly for funds, whose share classes are hard to identify
+and whose prices are often stale or missing.
+
+The application therefore makes automatic pricing \textbf{opt-in}. When adding a
+position the user ticks a box, or pastes a symbol; otherwise the position keeps
+the value that was typed and only the profit is recomputed.
+
+\begin{lstlisting}[style=py]
+def refresh_position(inv: Investment) -> bool:
+    if not inv.auto_value:
+        return False
+    symbol = inv.yahoo_symbol or (
+        crypto_symbol(inv.asset) if inv.broker == "kraken" else None)
+    if not symbol or inv.quantity is None:
+        return False
+    price = fetch_price(symbol)
+    if price is None:
+        return False
+    inv.current_price = price
+    inv.price_updated_at = datetime.now(timezone.utc)
+    inv.current_value = (Decimal(inv.quantity) * price).quantize(Decimal("0.01"))
+    inv.profit = total_profit(...)
+    return True
+\end{lstlisting}
+
+The function returns a boolean, and every guard returns \code{False} instead of
+raising. A failed price lookup is normal: markets close, tickers change, networks
+fail. The position simply keeps its previous value, which is stale but correct,
+rather than being wiped to zero.
+
+\begin{pitfall}[Silent failure is right here, wrong elsewhere]
+Swallowing an error is usually a bad habit. It is right here because the
+alternative, an exception during a nightly job, would leave the whole portfolio
+unrefreshed because of one delisted ticker. Compare with the backup in chapter
+\ref{ch:operations}, where a failure must be loud.
+\end{pitfall}
+
+The batch version collects errors per position and keeps going:
+
+\begin{lstlisting}[style=py]
+for inv in positions:
+    try:
+        if refresh_position(inv):
+            updated += 1
+    except Exception as exc:      # one bad symbol must not abort the batch
+        errors.append(f"{inv.asset}: {exc}")
+\end{lstlisting}
+
+\section{From an ISIN to a ticker}
+
+Users know the ISIN of a product because it is printed on every statement. They
+rarely know its Yahoo Finance symbol, which also depends on the exchange. The
+application resolves one into the other in two steps.
+
+\begin{enumerate}
+  \item \textbf{Yahoo search.} Every suggested symbol is probed with a price
+        request, preferring symbols quoted in euros. This is what resolves
+        funds, whose symbols look like \code{0P0001CLDK.F}.
+  \item \textbf{OpenFIGI.} A free mapping API that returns a ticker and an
+        exchange code, which are combined into a Yahoo symbol through a suffix
+        table. This works well for listed shares and ETFs.
+\end{enumerate}
+
+\begin{lstlisting}[style=py]
+EXCH_TO_YAHOO_SUFFIX = {
+    "GR": ".DE", "GY": ".DE", "GF": ".DE",   # Germany
+    "SM": ".MC",                              # Spain
+    "FP": ".PA", "NA": ".AS", "BB": ".BR",    # Euronext
+    "LN": ".L", "IM": ".MI", "SW": ".SW",
+    "US": "", "UN": "", "UW": "", "UQ": "",   # United States, no suffix
+}
+\end{lstlisting}
+
+When a product is listed on several exchanges, European venues are preferred, so
+the price comes back in the same currency as the rest of the portfolio.
+
+Results are cached in a module-level dictionary, including the negative ones. An
+ISIN that resolves to nothing resolves to nothing all day, and there is no reason
+to ask twice.
+
+\section{Contributions}
+
+Regular investing means adding money to the same position every month. The model
+keeps a single \code{invested} figure, the accumulated cost, which grows with
+every contribution. Profit is then always the value minus what was actually put
+in.
+
+\begin{lstlisting}[style=py]
+def contribute(db, inv, amount, units=ZERO) -> None:
+    inv.invested = Decimal(inv.invested or 0) + amount
+    if units:
+        inv.quantity = Decimal(inv.quantity or 0) + Decimal(units)
+
+    if not (inv.auto_value and refresh_position(inv)):
+        inv.current_value = Decimal(inv.current_value or 0) + amount
+        inv.profit = total_profit(...)
+\end{lstlisting}
+
+The conditional is the interesting part. For an automatically valued position,
+the market price already reflects the new units, so adding the contributed amount
+to the value would count it twice. For a manual position there is no price, so
+the contributed money enters the value directly and the user adjusts later.
+
+A position can also carry a \code{monthly\_contribution}. A scheduled job on the
+first of each month applies all of them, logging and skipping any that fail, so
+one broken position does not stop the rest.

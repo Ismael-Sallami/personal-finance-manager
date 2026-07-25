@@ -23,6 +23,22 @@ missing feature.
 
 ---
 
+## Full project report
+
+A 51-page report walks through the whole project: the design decisions and why
+the alternatives were dropped, how each area works, how it is deployed and kept
+alive on a free tier, and how a private repository was turned into this public
+one without leaking anything.
+
+📄 **[Read the report (PDF)](informe/informe.pdf)** · LaTeX sources in
+[`informe/`](informe/)
+
+```bash
+cd informe && make        # rebuild it (needs a LaTeX distribution)
+```
+
+---
+
 ## Features
 
 **Expenses and income**
@@ -293,6 +309,7 @@ migrations/     Alembic
 scripts/        seed.py  backup.py
 tests/
 docs/           ARCHITECTURE.md  DEPLOYMENT.md
+informe/        LaTeX sources of the project report + informe.pdf
 ```
 
 ---

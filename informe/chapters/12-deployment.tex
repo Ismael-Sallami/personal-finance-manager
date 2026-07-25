@@ -1,0 +1,156 @@
+\chapter{Deployment}
+\label{ch:deployment}
+
+\section{Two paths, both supported}
+
+The project supports two deployments, and they do not mix:
+
+\begin{itemize}
+  \item \textbf{Self-hosted}: Docker Compose brings up the application and its
+        own Postgres on any machine. Nothing depends on a provider.
+  \item \textbf{Managed}: a hosting platform for the application plus a managed
+        Postgres. Free tiers work, with the caveats of chapter
+        \ref{ch:operations}.
+\end{itemize}
+
+Supporting both is not indecision. The compose file is an escape hatch: if a
+free tier changes its terms, moving is one command plus restoring the last
+backup, not a project.
+
+\section{The image}
+
+\begin{lstlisting}[style=sh]
+FROM python:3.12-slim
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE 8080
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+\end{lstlisting}
+
+Three details do useful work. Copying \code{requirements.txt} before the source
+means the dependency layer is cached and a code change does not reinstall
+everything. \code{PYTHONUNBUFFERED} makes logs appear immediately instead of
+being buffered until the process ends. And the command reads \code{\$PORT} with
+a default, because some platforms assign the port at runtime while others expect
+a fixed one.
+
+\section{Compose}
+
+\begin{lstlisting}[style=sh]
+services:
+  db:
+    image: postgres:16-alpine
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finance -d finance"]
+      interval: 5s
+      retries: 10
+  app:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://finance:${POSTGRES_PASSWORD:-finance}@db:5432/finance
+      USE_SCHEDULER: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+\end{lstlisting}
+
+The healthcheck plus \code{condition: service\_healthy} is the part that matters.
+Without it, the application starts as soon as the database container exists,
+which is several seconds before Postgres accepts connections, and the first boot
+fails on a connection error.
+
+The compose file also overrides \code{DATABASE\_URL} and turns the in-process
+scheduler on, because this deployment does not sleep and does not need an
+external cron.
+
+\section{Managed hosting}
+
+\code{render.yaml} and \code{fly.toml} are committed as blueprints. Both keep
+secrets out of the repository: values marked \code{sync: false} are filled in
+the provider dashboard.
+
+\begin{lstlisting}[style=sh]
+envVars:
+  - key: IS_PROD
+    value: "true"
+  - key: COOKIE_SECURE
+    value: "true"
+  - key: USE_SCHEDULER
+    value: "false"
+  - key: SECRET_KEY
+    sync: false
+  - key: DATABASE_URL
+    sync: false
+\end{lstlisting}
+
+The three non-secret values encode the operating mode of that platform: it
+serves HTTPS, so the cookie can be secure; it sleeps, so the scheduler is off.
+The Fly configuration does the opposite, keeping one machine always on and
+running the migration as a release command.
+
+\section{Connecting to Postgres}
+
+The connection string needs two things that are easy to miss:
+
+\begin{lstlisting}[style=sh]
+DATABASE_URL=postgresql+psycopg2://user:PASSWORD@host:5432/dbname?sslmode=require
+\end{lstlisting}
+
+The \code{+psycopg2} suffix tells SQLAlchemy which driver to use; without it the
+URL may select a driver that is not installed. \code{sslmode=require} encrypts
+the connection, which matters because the database is reached over the public
+internet.
+
+The engine is configured for a pooled endpoint:
+
+\begin{lstlisting}[style=py]
+def _engine_kwargs() -> dict:
+    if settings.is_sqlite:
+        return {"connect_args": {"check_same_thread": False}}
+    return {"pool_pre_ping": True, "pool_recycle": 1800}
+\end{lstlisting}
+
+\code{pool\_pre\_ping} tests a pooled connection before handing it out, and
+\code{pool\_recycle} discards connections older than thirty minutes. Both exist
+because a connection pooler, or an idle timeout on the provider side, can close
+a socket that the application still believes is open. Without these two options
+the first request after an idle period fails with a confusing error.
+
+\section{Migrations in production}
+
+Migrations do not run automatically on every deploy, except on Fly where a
+release command does it. Elsewhere the sequence after the first deploy is
+explicit:
+
+\begin{lstlisting}[style=sh]
+alembic upgrade head
+python -m scripts.seed
+\end{lstlisting}
+
+Running migrations automatically on every start is convenient and risky: several
+instances booting at once can run them concurrently, and a failed migration
+takes the deployment with it. For a single-user application, running them by
+hand when a release carries one is the cheaper trade.
+
+\section{The first-boot checklist}
+
+\begin{enumerate}
+  \item Generate \code{SECRET\_KEY} and set it. The application refuses to boot
+        in production without it.
+  \item Set \code{DATABASE\_URL}, with the driver prefix and \code{sslmode}.
+  \item Set \code{IS\_PROD=true} and \code{COOKIE\_SECURE=true} once HTTPS is
+        live.
+  \item Run \code{alembic upgrade head} and \code{python -m scripts.seed}.
+  \item Set \code{TASKS\_TOKEN} and register the cron jobs.
+  \item Point an uptime monitor at \code{/health/db}.
+  \item Configure the Telegram token, chat id, webhook secret and
+        \code{PUBLIC\_BASE\_URL}, then redeploy so the webhook registers.
+  \item Trigger one backup by hand and check the file arrives.
+\end{enumerate}
+
+Step eight is the one people skip. A backup that has never been tested is a
+belief, not a backup.

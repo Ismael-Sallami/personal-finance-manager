@@ -1,0 +1,13 @@
+# LaTeX build artefacts. The PDF itself is committed on purpose,
+# so the README link works without building anything.
+*.aux
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+chapters/*.aux
+
+# The built report is committed (the root .gitignore excludes *.pdf).
+!informe.pdf

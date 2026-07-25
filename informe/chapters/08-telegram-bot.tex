@@ -1,0 +1,202 @@
+\chapter{The Telegram bot}
+\label{ch:bot}
+
+\section{Why a bot}
+
+The web application works on a phone, but opening a browser, logging in and
+filling a form is still friction, and friction is what kills the habit of
+recording expenses. A chat is already open on the phone, so the bot removes the
+last excuse: the user types the same lines they used to write in a notes app,
+and they land in the database.
+
+\section{No extra dependency}
+
+The bot talks to the Telegram Bot API over plain HTTP with \code{httpx}, which
+the project already uses. There is no bot framework.
+
+\begin{lstlisting}[style=py]
+API = "https://api.telegram.org/bot{token}/{method}"
+
+async def send_message(chat_id, text, reply_markup=None) -> None:
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+               "disable_web_page_preview": True}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+        await c.post(_url("sendMessage"), json=payload)
+\end{lstlisting}
+
+The API is small: send a message, edit a message, answer a callback, send a
+document. Four functions cover everything the application does, and adding a
+framework to wrap four HTTP calls would have added a dependency, a second event
+loop model and a second way to configure things.
+
+\section{Webhook instead of polling}
+
+There are two ways to receive updates. Polling asks Telegram for new messages in
+a loop, which needs a process that is always awake. A webhook lets Telegram POST
+each update to a URL.
+
+The application uses a webhook, because on a free host nothing is guaranteed to
+stay awake, and an incoming request is exactly what wakes it up.
+
+\begin{lstlisting}[style=py]
+async def setup_webhook() -> None:
+    if not settings.public_base_url:
+        return
+    url = settings.public_base_url.rstrip("/") + "/tg/webhook"
+    payload = {"url": url, "drop_pending_updates": True,
+               "allowed_updates": ["message", "callback_query"]}
+    if settings.telegram_webhook_secret:
+        payload["secret_token"] = settings.telegram_webhook_secret
+    ...
+\end{lstlisting}
+
+\code{drop\_pending\_updates} avoids replaying a backlog after a redeploy, and
+\code{allowed\_updates} keeps Telegram from sending update types the application
+ignores.
+
+\section{Two locks on the door}
+
+The webhook URL is public, so anybody can POST to it. Two independent checks
+protect it.
+
+\textbf{First, the secret token.} It is registered with the webhook, and
+Telegram sends it back in a header on every update. The router compares it in
+constant time:
+
+\begin{lstlisting}[style=py]
+secret = settings.telegram_webhook_secret
+if secret and not secrets.compare_digest(x_telegram_bot_api_secret_token or "", secret):
+    return Response(status_code=403)
+\end{lstlisting}
+
+\textbf{Second, the chat allowlist.} Even a genuine Telegram update is only
+served if it comes from an allowed chat, because anybody who finds the bot name
+can message it.
+
+\begin{lstlisting}[style=py]
+def is_allowed(chat_id) -> bool:
+    allow = settings.allowed_chat_ids
+    return (not allow) or (str(chat_id) in allow)
+\end{lstlisting}
+
+An empty allowlist means setup mode: the bot replies with the chat id so the
+owner can copy it into the configuration. Once the allowlist has a value,
+anything else is ignored in silence, with a line in the log. Answering an
+intruder only confirms that the bot exists.
+
+\begin{pitfall}[Never answer 5xx to Telegram]
+The webhook returns \code{200} even when handling the update failed. Telegram
+retries on server errors, and a bug that raises on one message would turn into
+an endless retry of the same message. The error is logged; the update is
+acknowledged.
+\end{pitfall}
+
+\section{Confirm before writing}
+
+Free text is read by the same parser the web import uses. The result is not
+saved: it is shown as a preview with two buttons.
+
+\begin{lstlisting}[style=py]
+token = secrets.token_urlsafe(6)
+_PENDING[token] = (chat_id, parsed)
+while len(_PENDING) > _MAX_PENDING:
+    _PENDING.popitem(last=False)          # drop the oldest
+...
+await send_message(chat_id, body, reply_markup=_kb([
+    [("Confirm", f"c:ok:{token}"), ("Cancel", f"c:no:{token}")]]))
+\end{lstlisting}
+
+Pressing a button sends a callback with that token, and only then are the rows
+inserted. The message is edited in place with the result, so the chat shows what
+happened instead of growing a new message.
+
+Pending previews live in a capped \code{OrderedDict} in memory. That is a
+deliberate choice with two consequences: a restart loses them, and an old
+preview is evicted after fifty newer ones. Both are safe, because losing a
+pending preview means nothing was written. Storing them in the database would
+have meant a table, a cleanup job and a way to expire rows, to protect data that
+does not exist yet.
+
+\section{Periods and ranges}
+
+Several commands accept a period. The parser handles a month, a year, or a range
+of either, and returns a label for the report title.
+
+\begin{lstlisting}[style=py]
+def _parse_range(arg: str) -> tuple[int, int, int, int, str]:
+    toks = [t for t in (arg or "").split() if t.lower() not in _CONNECTORS]
+    if not toks:
+        y, m = _parse_period("")
+        return y, m, y, m, f"{MONTHS[m]} {y}"
+    if len(toks) == 1:
+        y, m = _parse_period(toks[0])
+        if m:
+            return y, m, y, m, f"{MONTHS[m]} {y}"
+        return y, 1, y, 12, str(y)          # a year alone means the whole year
+    ya, ma = _parse_period(toks[0])
+    yb, mb = _parse_period(toks[-1])
+    return ya, (ma or 1), yb, (mb or 12), f"{MONTHS[ma or 1][:3]} {ya} – ..."
+\end{lstlisting}
+
+Connector words such as \emph{to} and \emph{until} are dropped, so
+\code{/report 01/2026 to 03/2026} and \code{/report 01/2026 03/2026} both work.
+A year without a month opens at January and closes at December, which is what a
+person means when they type a year.
+
+The report command then picks the right generator: a single month gives a
+monthly report, a full year gives a yearly one, anything else gives a range
+report.
+
+\section{Commands}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}p{4.6cm}p{9.1cm}@{}}
+\toprule
+\textbf{Command} & \textbf{Answer} \\
+\midrule
+\code{/menu} & Button menu, which is faster than typing on a phone. \\
+\code{/summary [mm/yyyy]} & Income, expenses, savings and net worth. \\
+\code{/net [period]} & Income, expenses and the net figure, any range. \\
+\code{/networth} & Investments and accounts, with profit and return. \\
+\code{/banks}, \code{/bank <name> <balance>} & Read or update balances. \\
+\code{/expenses [mm/yyyy]} & Expenses by category. \\
+\code{/cashflow [yyyy]} & Income against expenses, month by month. \\
+\code{/savings [mm/yyyy]} & Savings of the period. \\
+\code{/report [period]} & PDF with charts. \\
+\code{/detailed [period]} & Full PDF: net worth, categories, cashflow. \\
+\bottomrule
+\end{tabular}
+\caption{The bot command set.}
+\end{table}
+
+The \code{/bank} command is the only one that writes without confirmation, since
+it overwrites a single number the user just typed and the reply shows the new
+total.
+
+\section{Synchronous and asynchronous sending}
+
+The module has two ways to send. The async functions serve the webhook. A pair
+of synchronous ones serve the scheduler, which runs in a background thread with
+no event loop.
+
+They differ in how they treat failure, and the difference is intentional:
+
+\begin{lstlisting}[style=py]
+def send_document_sync(chat_id, data, filename, caption="", mime="application/pdf"):
+    r = httpx.post(_url("sendDocument"), ...)
+    r.raise_for_status()          # a failed backup must be loud
+
+def send_message_sync(chat_id, text) -> None:
+    try:
+        httpx.post(_url("sendMessage"), ...)
+    except Exception as exc:
+        log.warning("send_message_sync failed: %s", exc)   # a lost reminder is fine
+\end{lstlisting}
+
+A month-end reminder that does not arrive costs nothing. A backup that fails
+silently is worse than having no backup at all, because it produces false
+confidence. So one swallows the error and the other propagates it up to the task
+endpoint, which turns it into a \code{500} that the cron shows in red.

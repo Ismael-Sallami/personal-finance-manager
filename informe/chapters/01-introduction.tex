@@ -1,0 +1,107 @@
+\chapter{Introduction}
+
+\section{What this report is}
+
+This report explains a complete software project from end to end: what problem
+it solves, how it was designed, how each part works, how it is deployed, and how
+it is kept running once nobody is watching it. It is written as a guide, so a
+reader who has never seen the code can follow the reasoning and learn from it.
+
+The project is a \textbf{personal finance manager}: a small web application that
+records expenses and income, tracks investments across several brokers,
+calculates net worth, produces Excel and PDF reports, and answers from a
+Telegram chat.
+
+Every chapter follows the same shape. It states the problem, shows the decision
+that was taken, and explains why the alternatives were left aside. Code appears
+only when it makes the explanation shorter than prose would.
+
+\section{Who it is for}
+
+The report assumes the reader knows Python and has seen a web framework before.
+It does not assume knowledge of FastAPI, SQLAlchemy, Alembic, the Telegram Bot
+API or financial concepts. Those are introduced where they first appear.
+
+A reader who only wants to run the application does not need this document; the
+repository \file{README.md} covers that in a page. This report is for the reader
+who wants to understand \emph{why} the code looks the way it does.
+
+\section{Where the project came from}
+
+The application replaced five desktop scripts written in Python with a
+\code{tkinter} interface. Each script covered one area: expenses, income,
+investments, a shared property, and account balances. They worked, but they
+carried the problems that small personal tools usually carry:
+
+\begin{itemize}
+  \item They only ran with the computer switched on, so nothing could be
+        recorded from a phone.
+  \item Data lived in loose files, mostly spreadsheets, text files and PDFs.
+        There was no database, no history, and no safe way to query anything.
+  \item Amounts were handled as \code{float}. Cents drifted.
+  \item Personal data and absolute paths were written directly in the source.
+  \item There were no tests, so a change in one script could break another
+        without anybody noticing.
+\end{itemize}
+
+The goal of the rewrite was a single application, reachable from a phone, with a
+real database, sound arithmetic, and no personal data in the code.
+
+\section{What the application does today}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}p{4.1cm}p{9.6cm}@{}}
+\toprule
+\textbf{Area} & \textbf{What it covers} \\
+\midrule
+Expenses and income & Manual entry plus a paste importer that reads the notes
+the user already keeps on a phone, evaluates the arithmetic in each line, and
+shows a preview before saving. \\
+Investments & Statement import for three brokers, manual positions, automatic
+revaluation from market prices, and recurring contributions. \\
+Net worth & Bank accounts and cash added to the investment value, with a daily
+snapshot that feeds an evolution chart. \\
+Reports & Excel exports and PDF reports with charts, for a month, a year or any
+range of months. \\
+Telegram bot & Logging entries from a chat with a confirmation step, plus
+summaries, balances and reports on demand. \\
+Operations & Health endpoints, scheduled jobs, and a weekly database backup
+delivered outside the hosting provider. \\
+\bottomrule
+\end{tabular}
+\caption{Scope of the application.}
+\end{table}
+
+\section{Design principles}
+
+Five rules shaped almost every decision in the project. They are stated here
+once and referenced throughout the report.
+
+\begin{keypoint}[The five rules]
+\begin{enumerate}
+  \item \textbf{Money is never a float.} Amounts are \code{Decimal} in Python
+        and \code{NUMERIC} in the database.
+  \item \textbf{Nothing personal in the code.} Every value that changes between
+        users comes from the environment.
+  \item \textbf{One place per calculation.} The web pages, the reports and the
+        bot call the same functions, so their totals cannot disagree.
+  \item \textbf{Fail loudly where it matters, quietly where it does not.} A
+        failed backup returns an error; a failed price lookup leaves the old
+        value in place.
+  \item \textbf{Boot fast.} Slow startup is not a comfort issue; on a host that
+        sleeps, it is the difference between a bot that answers and one that
+        does not.
+\end{enumerate}
+\end{keypoint}
+
+\section{How to read this report}
+
+Chapters \ref{ch:architecture} to \ref{ch:reports} describe the application from
+the inside: structure, data, and each functional area. Chapter
+\ref{ch:bot} covers the Telegram bot. Chapters \ref{ch:operations} to
+\ref{ch:deployment} cover everything that happens after the code is written:
+running it, securing it, testing it and deploying it. Chapter
+\ref{ch:going-public} describes a separate exercise, turning a private
+repository into a public one without leaking anything. The last chapter collects
+the lessons that were only obvious afterwards.

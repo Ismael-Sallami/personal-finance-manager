@@ -1,0 +1,141 @@
+\chapter{Net worth and aggregation}
+
+\section{What was missing}
+
+An early version of the application tracked investments and called their value
+"net worth". That was wrong in an obvious way: it ignored the money sitting in
+bank accounts, which for most people is a large part of what they have.
+
+Adding accounts was easy. Deciding how they participate in the rest of the
+application was the real work.
+
+\section{Accounts}
+
+An account is a name, a kind (account, savings or cash), a balance and a
+timestamp. There is no bank integration, and that is a decision rather than a
+limitation: connecting to a bank means credentials, aggregation providers and a
+recurring cost, for data the user can update in ten seconds a month.
+
+Every write to an account ends the same way:
+
+\begin{lstlisting}[style=py]
+db.commit()
+snapshot_today(db)
+\end{lstlisting}
+
+So the evolution chart follows real changes instead of only moving when a
+statement is imported.
+
+\section{The aggregation module}
+
+\file{app/services/aggregation.py} is the only place that computes totals. The
+web pages, the PDF reports and the Telegram bot all read from it, which is what
+guarantees that the same number appears everywhere.
+
+Its main function builds the whole dashboard payload in one pass:
+
+\begin{lstlisting}[style=py]
+def build_dashboard(db, year=None, month=None) -> dict:
+    invs = latest_investments(db)
+    inv_value = sum(_f(i.current_value) for i in invs)
+    inv_invested = sum(_f(i.invested) for i in invs)
+    inv_profit = sum(_f(i.profit) for i in invs)
+    return_pct = (inv_profit / inv_invested * 100) if inv_invested else 0.0
+
+    banks = db.scalars(select(BankAccount).order_by(BankAccount.balance.desc())).all()
+    bank_value = sum(_f(b.balance) for b in banks)
+    net_worth = inv_value + bank_value
+    ...
+    return {"year": year, "month": month, "kpis": {...}, "charts": {...}}
+\end{lstlisting}
+
+Note the guard on the division. An empty portfolio has zero invested, and a
+return of zero is the honest answer; raising or returning infinity would be
+worse.
+
+\section{Month ranges without special cases}
+
+Several features ask for a range of months: a report from October 2025 to March
+2026, a cashflow chart, a net figure for any period. Written naively, those
+queries fill up with conditions about years and boundaries.
+
+The module converts a year and a month into a single integer, the month ordinal:
+
+\begin{lstlisting}[style=py]
+def _month_ordinals(y1, m1, y2, m2) -> tuple[int, int]:
+    start, end = y1 * 12 + m1, y2 * 12 + m2
+    return (end, start) if start > end else (start, end)
+
+_ORDINAL = Transaction.year * 12 + Transaction.month
+\end{lstlisting}
+
+A range then becomes a plain comparison, \code{\_ORDINAL >= start} and
+\code{\_ORDINAL <= end}, with no year logic at all. The same expression is built
+once by SQLAlchemy and reused by every range query.
+
+Reversed inputs are normalised in the same helper, so a user who types the end
+month first gets the range they meant instead of an empty result.
+
+Turning an ordinal back into a year and a month is one line:
+
+\begin{lstlisting}[style=py]
+for o in range(start, end + 1):
+    y, m0 = divmod(o - 1, 12)
+    months.append((y, m0 + 1))
+\end{lstlisting}
+
+\begin{keypoint}[The general lesson]
+When a range keeps producing boundary bugs, it is usually the representation
+that is wrong, not the conditions. Mapping the values onto a single ordered
+number makes the boundaries disappear.
+\end{keypoint}
+
+\section{The dashboard}
+
+The dashboard answers two questions on one screen: how much does the user have,
+and where did this month go.
+
+Four indicators sit at the top: net worth (with the split between investments
+and banks, plus profit and return), income of the month, expenses of the month,
+and savings of the month with the invested part noted underneath.
+
+Four charts follow:
+
+\begin{itemize}
+  \item income against expenses per month of the year, as bars;
+  \item expenses by category for the selected month, as a doughnut;
+  \item net worth over time, as a line, from the snapshot table;
+  \item the split of net worth by broker and account, as a doughnut.
+\end{itemize}
+
+The net worth series has a fallback. When there are no snapshots yet, because
+the application was just installed, it groups investments by valuation date
+instead, so the chart is not empty on the first day.
+
+\begin{lstlisting}[style=py]
+if snaps:
+    evo_labels = [d.strftime("%d/%m/%y") for d, _ in snaps]
+    evo_data = [round(_f(s), 2) for _, s in snaps]
+else:
+    evo = db.execute(select(Investment.valued_on, func.sum(Investment.current_value))
+                     .group_by(Investment.valued_on)
+                     .order_by(Investment.valued_on)).all()
+\end{lstlisting}
+
+\section{An empty database is a valid state}
+
+Every aggregation function is written so that a fresh installation renders
+correctly. Sums return zero instead of \code{None}, thanks to a small helper:
+
+\begin{lstlisting}[style=py]
+def _f(x) -> float:
+    return float(x or 0)
+\end{lstlisting}
+
+The list of years falls back to the current year when there are no transactions,
+so the year selector is never empty. And the payload carries a \code{has\_data}
+flag, which the template uses to show a short message pointing at the two places
+where a new user should start.
+
+It is a small thing, and it is the difference between an application that looks
+broken on day one and one that looks ready.

@@ -1,0 +1,206 @@
+\chapter{Keeping it running}
+\label{ch:operations}
+
+\section{The failure that started this chapter}
+
+The application was deployed on a free plan and worked. Some days later the bot
+stopped answering. Nothing had been changed, no error appeared in the logs, and
+opening the web page worked normally after a short wait.
+
+The cause was a combination of two behaviours that are documented, free, and
+easy to overlook:
+
+\begin{itemize}
+  \item the hosting platform \textbf{suspends} the application after about
+        fifteen minutes without traffic;
+  \item the managed database \textbf{pauses} the project after several days
+        without queries.
+\end{itemize}
+
+Neither is a bug. Together they break the bot in a way that is invisible: when a
+message arrives, Telegram POSTs to a process that is still starting. Telegram
+waits a few seconds, gives up, and drops the update. By the time the application
+is ready, there is nothing left to answer. The user sees a bot that ignores
+them, and the logs show a clean startup.
+
+\begin{keypoint}[The lesson]
+A deployment is not finished when the application answers. It is finished when
+it still answers a week later without anybody touching it. That last part is a
+feature, and it has to be designed like one.
+\end{keypoint}
+
+\section{Three pieces}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}p{3.4cm}p{5.4cm}p{4.7cm}@{}}
+\toprule
+\textbf{Piece} & \textbf{What it does} & \textbf{Where it runs} \\
+\midrule
+Uptime monitor & \code{GET /health/db} every five minutes & An external monitor \\
+Task cron & \code{POST /tasks/*} on a schedule & An external cron \\
+Backup & \code{POST /tasks/backup} weekly & The same cron \\
+\bottomrule
+\end{tabular}
+\caption{What keeps the application alive on a free plan.}
+\end{table}
+
+The monitor solves both problems at once. Each request keeps the application
+from being suspended, and because the endpoint queries the database, it also
+keeps the database from being paused. A single ping every five minutes replaces
+both problems with none.
+
+\section{Why the health endpoints differ}
+
+\begin{lstlisting}[style=py]
+@app.get("/health")
+def health():
+    """Liveness: says the process answers. It does not touch the database."""
+    return {"status": "ok", "db": "sqlite" if settings.is_sqlite else "postgres"}
+
+@app.get("/health/db")
+def health_db():
+    """Readiness: a real SELECT 1, and 503 when the database is silent."""
+    db = SessionLocal()
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception as exc:
+        return JSONResponse({"status": "error", "db": "unreachable",
+                             "detail": str(exc)[:200]}, status_code=503)
+    finally:
+        db.close()
+    return {"status": "ok", ...}
+\end{lstlisting}
+
+The platform healthcheck points at \code{/health}, which never fails because of
+the database. If it did, a five minute database outage would make the platform
+consider the application broken and remove the deployment, so a temporary
+problem would become a permanent one.
+
+The external monitor points at \code{/health/db}, which fails loudly on purpose.
+A paused database with a process still running is exactly the situation that
+must produce an alert.
+
+Four tests pin this behaviour, including one that patches the session factory to
+raise and asserts that \code{/health} still answers \code{200}.
+
+\section{Scheduled jobs, twice}
+
+The same four jobs can run in two different ways.
+
+On an always-on machine, an in-process scheduler is enough:
+
+\begin{lstlisting}[style=py]
+sched.add_job(_refresh_prices, CronTrigger(hour=3, minute=0), id="prices")
+sched.add_job(_contributions, CronTrigger(day=1, hour=6, minute=0), id="contributions")
+sched.add_job(_snapshot, CronTrigger(hour=23, minute=0), id="snapshot")
+if settings.telegram_enabled:
+    sched.add_job(_reminder, CronTrigger(day="last", hour=20, minute=0), id="reminder")
+\end{lstlisting}
+
+On a host that sleeps it is useless: a scheduler inside a suspended process does
+not fire. The same jobs are therefore exposed as HTTP endpoints that an external
+cron can call.
+
+\begin{lstlisting}[style=py]
+JOBS = {"prices", "contributions", "snapshot", "reminder", "backup"}
+
+@router.post("/{job}")
+def run_task(job: str, x_tasks_token: str | None = Header(default=None),
+             token: str | None = Query(default=None), db: Session = Depends(get_session)):
+    if not _authorised(x_tasks_token, token):
+        return JSONResponse({"ok": False, "error": "not authorised"}, status_code=403)
+    if job not in JOBS:
+        return JSONResponse({"ok": False, "error": "unknown job"}, status_code=404)
+    ...
+\end{lstlisting}
+
+A single environment variable, \code{USE\_SCHEDULER}, picks the mode. The job
+functions are shared, so the two paths cannot drift apart.
+
+\section{Two ways to send the token}
+
+The endpoints accept the token either in a header or in the query string. That
+looks like sloppy design, and it is the result of a debugging session.
+
+The header is the better option: it keeps the secret out of URLs, out of browser
+history and out of proxy logs. It was the only option in the first version.
+
+Then the cron service refused to work. Every job returned \code{403}, with no
+further detail, because a rejected request is all the endpoint is willing to say.
+The cause was that the free cron service does not forward custom headers to the
+target. The header was simply never arriving.
+
+\begin{lstlisting}[style=py]
+def _authorised(header_token, query_token) -> bool:
+    expected = settings.tasks_token
+    if not expected:               # no token configured: endpoints disabled
+        return False
+    submitted = header_token or query_token or ""
+    return secrets.compare_digest(submitted, expected)
+\end{lstlisting}
+
+An empty configured token disables the endpoints entirely, rather than allowing
+everything, which is the direction a mistake here should fail in. The comparison
+uses \code{compare\_digest} so that a wrong token cannot be discovered by timing
+the response.
+
+\begin{pitfall}[Two more traps in the same area]
+The cron URL must use \code{https://}. With \code{http://} the platform answers
+a redirect, and a redirected POST loses its body, so the job appears to run and
+does nothing.
+
+And a job that fails must return a non-2xx status, or the cron dashboard shows
+green for a task that never worked. That is why the backup endpoint answers
+\code{500} when delivery failed.
+\end{pitfall}
+
+\section{Backups}
+
+A free managed database can be paused and, eventually, deleted. The backup
+therefore has one rule: the copy must not live inside the thing it protects.
+
+The dump is written by walking the SQLAlchemy metadata, so a new table joins the
+backup without anybody editing the backup code:
+
+\begin{lstlisting}[style=py]
+EXCLUDED_COLUMNS = {"users": {"password_hash"}}
+
+def export_data(db: Session) -> dict:
+    tables = {}
+    for name, table in Base.metadata.tables.items():
+        excluded = EXCLUDED_COLUMNS.get(name, set())
+        columns = [c for c in table.columns if c.name not in excluded]
+        rows = db.execute(select(*columns)).all()
+        tables[name] = [{c.name: _jsonable(v) for c, v in zip(columns, row)} for row in rows]
+    return {"generated": ..., "engine": ..., "tables": tables}
+\end{lstlisting}
+
+Three decisions are worth naming.
+
+\textbf{JSON, not \code{pg\_dump}.} The container image is \code{python:3.12-slim}
+and carries no Postgres client. Dumping through SQLAlchemy adds no dependency,
+produces the same file whether the source is SQLite or Postgres, and can be read
+without any tooling.
+
+\textbf{Decimals as strings.} \code{\_jsonable} converts \code{Decimal} to a
+string, never to a JSON number, because JSON numbers are floats and the whole
+project exists to avoid that.
+
+\textbf{The password hash never leaves.} It is excluded by name, and a test
+asserts that no bcrypt prefix appears anywhere in the serialised output. The
+user is recreated after a restore with the seed script, so the hash has no value
+in the backup and every reason not to travel through a messaging API.
+
+The file is gzipped and sent to the owner's chat, which puts it outside the
+provider. Restoring is the mirror image, with one safety rule:
+
+\begin{lstlisting}[style=sh]
+python -m scripts.backup restore copy.json.gz            # dry run, prints only
+python -m scripts.backup restore copy.json.gz --write    # deletes and inserts
+\end{lstlisting}
+
+Restore deletes the contents of every table present in the file, so the
+destructive path requires an explicit flag. Tables are deleted in reverse
+dependency order and inserted in forward order, using
+\code{Base.metadata.sorted\_tables}, so foreign keys hold at every step.
