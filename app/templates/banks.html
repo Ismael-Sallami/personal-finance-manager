@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}Banks{% endblock %}
+{% block header %}Banks · Cash{% endblock %}
+{% block content %}
+
+{% set icons = {'account':'🏦','savings':'💰','cash':'💶'} %}
+
+<!-- Total -->
+<div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+  <div class="kpi-hero rounded-2xl p-5 border border-accent/30 sm:col-span-1">
+    <div class="text-xs text-dim mb-1">TOTAL IN BANKS</div>
+    <div class="text-3xl font-extrabold text-accent">{{ total|money }}</div>
+    <div class="text-[11px] text-dim mt-1">{{ accounts|length }} account(s)</div>
+  </div>
+</div>
+
+<!-- Add account -->
+<div class="glass rounded-2xl p-5 border border-white/10 mb-4">
+  <div class="text-sm font-semibold mb-1">➕ Add account</div>
+  <p class="text-xs text-dim mb-3">Add as many accounts as you want, and keep your <b>cash</b> here too.
+    The total is added to your investments on the <a href="/" class="text-accent">Dashboard</a> as net worth.</p>
+  <form method="post" action="/banks/add" class="grid grid-cols-2 md:grid-cols-4 gap-2 items-end">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="col-span-2">
+      <label class="text-[11px] text-dim">Name</label>
+      <input name="name" required placeholder="Main bank / Savings / Cash" class="w-full bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm">
+    </div>
+    <div>
+      <label class="text-[11px] text-dim">Kind</label>
+      <select name="kind" class="w-full bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm">
+        {% for k in kinds %}<option value="{{ k }}">{{ icons[k] }} {{ k|capitalize }}</option>{% endfor %}
+      </select>
+    </div>
+    <div>
+      <label class="text-[11px] text-dim">Balance</label>
+      <input name="balance" placeholder="0.00" class="w-full bg-panel2 border border-white/10 rounded-lg px-2 py-2 text-sm text-right font-mono">
+    </div>
+    <div class="col-span-2 md:col-span-4">
+      <button class="bg-accent text-bg font-semibold rounded-lg px-5 py-2 text-sm hover:brightness-110">Add</button>
+    </div>
+  </form>
+</div>
+
+<!-- Accounts -->
+{% if accounts %}
+<div class="glass rounded-2xl border border-white/10 overflow-hidden">
+  <div class="overflow-x-auto">
+  <table class="w-full text-sm whitespace-nowrap">
+    <thead class="text-dim text-xs uppercase"><tr>
+      <th class="text-left px-5 py-2">Account</th>
+      <th class="text-left px-5 py-2">Kind</th>
+      <th class="text-right px-5 py-2">Balance</th>
+      <th class="text-left px-5 py-2">Updated</th>
+      <th class="px-5 py-2"></th>
+    </tr></thead>
+    <tbody>
+      {% for a in accounts %}
+      <tr class="border-t border-white/5 align-top">
+        <td class="px-5 py-2.5 font-medium">{{ icons.get(a.kind, '🏦') }} {{ a.name }}</td>
+        <td class="px-5 py-2.5 text-dim capitalize">{{ a.kind }}</td>
+        <td class="px-5 py-2.5 text-right font-mono">{{ a.balance|money }}</td>
+        <td class="px-5 py-2.5 text-dim text-xs">{{ a.updated_at.strftime('%d/%m/%y') if a.updated_at }}</td>
+        <td class="px-5 py-2.5 text-right">
+          <details>
+            <summary class="cursor-pointer text-dim hover:text-accent text-xs list-none">✎ edit</summary>
+            <form method="post" action="/banks/{{ a.id }}/edit" class="mt-2 grid grid-cols-2 gap-1 text-left bg-panel2 p-3 rounded-lg border border-white/10 w-72">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <div class="col-span-2"><label class="text-[10px] text-dim">Name</label><input name="name" value="{{ a.name }}" class="w-full bg-bg border border-white/10 rounded px-2 py-1 text-xs"></div>
+              <div><label class="text-[10px] text-dim">Kind</label>
+                <select name="kind" class="w-full bg-bg border border-white/10 rounded px-2 py-1 text-xs">
+                  {% for k in kinds %}<option value="{{ k }}" {{ 'selected' if k==a.kind }}>{{ k|capitalize }}</option>{% endfor %}
+                </select></div>
+              <div><label class="text-[10px] text-dim">Balance</label><input name="balance" value="{{ '%.2f'|format(a.balance) }}" class="w-full bg-bg border border-white/10 rounded px-2 py-1 text-xs font-mono"></div>
+              <button class="col-span-2 mt-1 bg-accent text-bg font-semibold rounded px-3 py-1.5 text-xs">Save</button>
+            </form>
+          </details>
+          <form method="post" action="/banks/{{ a.id }}/delete" onsubmit="return confirm('Delete {{ a.name }}?')" class="mt-1">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="text-dim hover:text-danger text-xs">✕ delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+    <tfoot>
+      <tr class="border-t border-white/10 font-semibold">
+        <td class="px-5 py-3" colspan="2">Total</td>
+        <td class="px-5 py-3 text-right font-mono text-accent">{{ total|money }}</td>
+        <td colspan="2"></td>
+      </tr>
+    </tfoot>
+  </table>
+  </div>
+</div>
+{% else %}
+<div class="text-dim text-sm">No accounts yet. Add your first bank or your cash above.</div>
+{% endif %}
+{% endblock %}
