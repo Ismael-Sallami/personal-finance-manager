@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d9488"/><stop offset="1" stop-color="#4338ca"/>
+    </linearGradient>
+    <radialGradient id="glow" cx=".5" cy=".42" r=".55">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".22"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="coin" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fde68a"/><stop offset=".55" stop-color="#fbbf24"/><stop offset="1" stop-color="#d97706"/>
+    </linearGradient>
+    <linearGradient id="leaf" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6ee7b7"/><stop offset="1" stop-color="#10b981"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#bg)"/>
+  <rect width="512" height="512" rx="116" fill="url(#glow)"/>
+  <!-- sprout -->
+  <path d="M256 214 C256 186 257 166 262 146" stroke="#065f46" stroke-width="14" stroke-linecap="round" fill="none"/>
+  <path d="M262 150 C226 150 196 126 188 88 C228 86 258 108 262 150 Z" fill="url(#leaf)"/>
+  <path d="M262 146 C290 128 324 128 352 146 C330 174 292 178 262 146 Z" fill="url(#leaf)"/>
+  <path d="M262 150 C238 136 218 116 206 96" stroke="#047857" stroke-width="5" stroke-linecap="round" fill="none" opacity=".55"/>
+  <!-- coin shadow + coin -->
+  <ellipse cx="256" cy="414" rx="118" ry="16" fill="#1e1b4b" opacity=".28"/>
+  <circle cx="256" cy="300" r="118" fill="#b45309"/>
+  <circle cx="256" cy="292" r="118" fill="url(#coin)"/>
+  <circle cx="256" cy="292" r="92" fill="none" stroke="#fff7ed" stroke-opacity=".55" stroke-width="6"/>
+  <!-- rising bars on the coin -->
+  <g fill="#78350f">
+    <rect x="206" y="300" width="24" height="44" rx="7"/>
+    <rect x="244" y="276" width="24" height="68" rx="7"/>
+    <rect x="282" y="246" width="24" height="98" rx="7"/>
+  </g>
+  <!-- shine on coin -->
+  <path d="M176 250 A96 96 0 0 1 226 198" stroke="#ffffff" stroke-opacity=".7" stroke-width="10" stroke-linecap="round" fill="none"/>
+  <!-- sparkle -->
+  <path d="M400 112 L410 140 L438 150 L410 160 L400 188 L390 160 L362 150 L390 140 Z" fill="#ffffff"/>
+  <path d="M120 360 L125 374 L139 379 L125 384 L120 398 L115 384 L101 379 L115 374 Z" fill="#ffffff" opacity=".75"/>
+</svg>

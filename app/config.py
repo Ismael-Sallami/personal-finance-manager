@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     # Entries before this date (yyyy-mm-dd) are never imported, so nothing you
     # already typed by hand gets duplicated. Empty = start of the current month.
     bank_sync_from: str = ""
+    # Platforms used only to invest (comma list, matched inside the bank name).
+    # Money sent to them from your spending accounts is "Investment"; their own
+    # movements are ignored (only their cash balance counts).
+    investment_banks: str = "trade republic,myinvestor"
     # How entries get in: auto (bank if EB is configured, else manual) | manual | bank
     entry_mode: str = "auto"
 

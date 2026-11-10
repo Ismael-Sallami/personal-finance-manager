@@ -267,3 +267,53 @@ def test_suggestion_uses_base_or_your_name():
     assert bs.suggestion("Primaprix Norte Ii", "", ["Groceries", "Leisure"]) == "Groceries"
     assert bs.suggestion("Farmacia Central", "", ["Groceries"]) == "Health"
     assert bs.suggestion("Sam T", "Flat rent Bizum", ["Rent"]) is None
+
+
+def test_psd2_query_limit(db, link):
+    eb = FakeEB([raw("1", tid="z")])
+    calls = []
+    orig = eb.transactions
+    eb.transactions = lambda uid, d: calls.append(uid) or orig(uid, d)
+    bs.sync_all(db, today=date(2026, 11, 10), client=eb)                  # daily job
+    bs.sync_all(db, today=date(2026, 11, 10), client=eb)                  # same day: no
+    r = bs.sync_all(db, today=date(2026, 11, 10), client=eb, force=True)  # manual, < 4 h: no
+    assert len(calls) == 1 and r.skipped == ["imagin"]
+    bs._LAST_QUERY.clear()                                                # hours pass
+    bs.sync_all(db, today=date(2026, 11, 10), client=eb, force=True)
+    assert len(calls) == 2
+
+
+def test_429_gives_a_clear_message(db, link):
+    class EB429(FakeEB):
+        def transactions(self, uid, date_from):
+            raise RuntimeError('GET /accounts/x/transactions -> 429: {"code":429}')
+    r = bs.sync_all(db, today=date(2026, 11, 10), client=EB429([]))
+    assert "query limit" in r.errors[0]
+
+
+def test_investment_platforms(db, link):
+    tr = BankLink(bank="Trade Republic", session_id="s", uid="tr", identification_hash="htr",
+                  valid_until=datetime(2030, 1, 1))
+    db.add(tr)
+    db.add(Transaction(date=date(2026, 11, 1), year=2026, month=11, kind="expense",
+                       category="Investment", amount=Decimal("50"), origin="manual"))
+    db.add(Transaction(date=date(2026, 11, 2), year=2026, month=11, kind="expense",
+                       category=bs.UNCATEGORIZED, amount=Decimal("100"), merchant="Unknown",
+                       origin="bank", account="Trade Republic", review=True,
+                       external_id="old-tr"))
+    db.commit()
+    eb = FakeEB({"u1": [raw("200", name="Trade Republic Bank GmbH", tid="inv1")],
+                 "tr": [raw("200", name=None, tid="etf1")]})
+    bs.sync_all(db, today=date(2026, 11, 10), client=eb)
+    txs = {t.external_id: t for t in db.scalars(select(Transaction))}
+    assert (txs["imagin:inv1"].kind, txs["imagin:inv1"].category) == ("expense", "Investment")
+    assert "Trade Republic:etf1" not in txs                 # internal buys: ignored
+    assert txs["old-tr"].kind == "transfer" and not txs["old-tr"].review
+    tr_acc = db.scalar(select(BankAccount).where(BankAccount.name == "Trade Republic"))
+    assert tr_acc.balance == Decimal("1234.56")             # its balance does count
+
+
+def test_investment_banks_are_configurable(monkeypatch):
+    monkeypatch.setattr(settings, "investment_banks", "Acme Broker", raising=False)
+    assert bs.is_platform("ACME Broker Ltd") and not bs.is_platform("Trade Republic")
+    assert bs.goes_to_investment("Transfer to Acme Broker", "imagin")

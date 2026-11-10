@@ -46,3 +46,12 @@ def db():
         yield s
     finally:
         s.close()
+
+
+@pytest.fixture(autouse=True)
+def _clear_query_limit():
+    """The bank query limit is in-memory state: isolate every test."""
+    from app.services import bank_sync
+    bank_sync._LAST_QUERY.clear()
+    yield
+    bank_sync._LAST_QUERY.clear()

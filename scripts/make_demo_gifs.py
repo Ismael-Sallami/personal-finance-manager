@@ -13,6 +13,12 @@ OUT.mkdir(parents=True, exist_ok=True)
 W, H, S = 440, 600, 2  # draw at 2x, downscale for crisp text
 F = "/usr/share/fonts/opentype/inter/Inter-{}.otf"
 font = lambda w, sz: ImageFont.truetype(F.format(w), sz * S)
+# Avatar del bot: el icono del repo, recortado en circulo como en Telegram.
+_ICON = Path(__file__).resolve().parent.parent / "app" / "static" / "img" / "bot-avatar-640.png"
+AVATAR = Image.open(_ICON).convert("RGBA").resize((36 * S, 36 * S), Image.LANCZOS)
+_mask = Image.new("L", AVATAR.size, 0)
+ImageDraw.Draw(_mask).ellipse([0, 0, *AVATAR.size], fill=255)
+AVATAR.putalpha(_mask)
 REG, MED, BOLD, SMALL = font("Regular", 14), font("Medium", 14), font("SemiBold", 15), font("Regular", 11)
 BG, HEAD, BOT, ME, BTN, BTN_HI = "#0e1621", "#17212b", "#182533", "#2b5278", "#22303f", "#3d6a99"
 TXT, DIM, ACC, OK, BAD = "#f5f5f5", "#7f91a4", "#6ab3f3", "#5fd38d", "#ef6f6f"
@@ -27,8 +33,7 @@ class Chat:
         d = ImageDraw.Draw(im)
         # header
         d.rectangle([0, 0, W * S, 56 * S], fill=HEAD)
-        d.ellipse([14 * S, 10 * S, 50 * S, 46 * S], fill="#3a7bd5")
-        d.text((32 * S, 28 * S), "₣", font=BOLD, fill="white", anchor="mm")
+        im.paste(AVATAR, (14 * S, 10 * S), AVATAR)
         d.text((60 * S, 14 * S), "Finance Bot", font=BOLD, fill=TXT)
         d.text((60 * S, 34 * S), "bot", font=SMALL, fill=DIM)
         # messages, bottom-anchored

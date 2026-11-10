@@ -56,25 +56,31 @@ def _call(method: str, path: str, **kw) -> dict:
     return r.json()
 
 
-def aspsp(bank: str) -> dict:
+def aspsps(country: str = COUNTRY) -> list[dict]:
+    """Banks available in a country (2-letter ISO code)."""
+    return _call("GET", "/aspsps", params={"country": country.upper()})["aspsps"]
+
+
+def aspsp(bank: str, country: str = COUNTRY) -> dict:
     """The bank's record (exact name, maximum consent validity...)."""
-    for b in _call("GET", "/aspsps", params={"country": COUNTRY})["aspsps"]:
+    for b in aspsps(country):
         if b["name"].lower() == bank.lower():
             return b
-    raise EBError(f"bank not found: {bank}")
+    raise EBError(f"bank not found: {bank} ({country})")
 
 
-def start_auth(bank: str, redirect_url: str, state: str) -> str:
+def start_auth(bank: str, redirect_url: str, state: str, country: str = COUNTRY) -> str:
     """Ask for authorisation and return the URL the user opens at their bank."""
-    b = aspsp(bank)
+    b = aspsp(bank, country)
     secs = b.get("maximum_consent_validity") or 90 * 86400
     until = datetime.now(timezone.utc) + timedelta(seconds=secs - 3600)
+    psu = "personal" if "personal" in (b.get("psu_types") or ["personal"]) else b["psu_types"][0]
     r = _call("POST", "/auth", json={
         "access": {"valid_until": until.isoformat()},
-        "aspsp": {"name": b["name"], "country": COUNTRY},
+        "aspsp": {"name": b["name"], "country": country.upper()},
         "state": state,
         "redirect_url": redirect_url,
-        "psu_type": "personal",
+        "psu_type": psu,
     })
     return r["url"]
 

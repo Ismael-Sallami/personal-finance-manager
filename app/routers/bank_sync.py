@@ -61,7 +61,7 @@ def callback(code: str | None = Query(default=None), state: str | None = Query(d
         n = len(links)
         # The connection is saved: if the import fails, /sync retries it.
         try:
-            r = bot_banks.run_sync(db)
+            r = bot_banks.run_sync(db, force=True, only=[bank])
             summary = f"Imported {r['new']} movements, {r['transfers']} transfers."
             if r["errors"]:
                 summary += "\n⚠ " + "; ".join(r["errors"])

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/media/logo.svg" width="120" alt="Personal Finance Manager logo: a gold coin sprouting a leaf">
+</p>
+
 # Personal Finance Manager
 
 Self-hosted web app to track expenses, income, investments and net worth, with a
