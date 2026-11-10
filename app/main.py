@@ -10,6 +10,7 @@ from app.auth import _NotAuthenticated
 from app.config import APP_ROOT, settings
 from app.routers import (
     auth_routes,
+    bank_sync,
     banks,
     dashboard,
     expenses,
@@ -36,8 +37,9 @@ async def lifespan(app: FastAPI):
             print(f"[scheduler] not started: {exc}")
     if settings.telegram_enabled:
         try:
-            from app.services.bot import setup_webhook
+            from app.services.bot import setup_commands, setup_webhook
             await setup_webhook()
+            await setup_commands()  # autocomplete when typing "/"
         except Exception as exc:
             print(f"[telegram] webhook not registered: {exc}")
     yield
@@ -110,6 +112,7 @@ app.include_router(investments.router)
 app.include_router(banks.router)
 app.include_router(reports.router)
 app.include_router(tasks.router)
+app.include_router(bank_sync.router)
 
 # Telegram bot, only when a token is configured.
 if settings.telegram_enabled:

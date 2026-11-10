@@ -35,8 +35,8 @@ def captured(monkeypatch):
     monkeypatch.setattr(bot, "answer_callback_query", fake_answer)
     monkeypatch.setattr(bot, "send_document", fake_doc)
 
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(engine)
+    from tests.conftest import make_engine
+    engine = make_engine()
     monkeypatch.setattr(bot, "SessionLocal", sessionmaker(bind=engine))
     monkeypatch.setattr(settings, "telegram_chat_id", "999", raising=False)
     bot._PENDING.clear()

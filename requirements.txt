@@ -6,6 +6,7 @@ jinja2==3.1.6                  # CVE-2025-27516
 python-multipart==0.0.32       # CVE-2026-24486/40347/42561
 itsdangerous==2.2.0
 httpx==0.28.1                  # runtime: Telegram Bot API + TestClient
+PyJWT[crypto]==2.10.1          # JWT signing for Enable Banking (bank sync)
 
 # --- Config / validation ---
 pydantic==2.10.4

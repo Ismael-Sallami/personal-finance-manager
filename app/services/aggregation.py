@@ -173,6 +173,7 @@ def cashflow_in_range(db: Session, y1: int, m1: int, y2: int, m2: int) -> tuple[
         select(Transaction.year, Transaction.month, Transaction.kind,
                func.sum(Transaction.amount))
         .where(_ORDINAL >= start, _ORDINAL <= end)
+        .where(Transaction.kind.in_(("expense", "income")))
         .group_by(Transaction.year, Transaction.month, Transaction.kind)
     ).all()
     months = []
@@ -219,6 +220,7 @@ def build_dashboard(db: Session, year: int | None = None, month: int | None = No
     rows = db.execute(
         select(Transaction.month, Transaction.kind, func.sum(Transaction.amount))
         .where(Transaction.year == year)
+        .where(Transaction.kind.in_(("expense", "income")))
         .group_by(Transaction.month, Transaction.kind)
     ).all()
     cf_e = [0.0] * 12

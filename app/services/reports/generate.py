@@ -51,12 +51,16 @@ def yearly_pdf(db: Session, year: int) -> bytes:
     rows = db.execute(
         select(Transaction.month, Transaction.kind, func.sum(Transaction.amount))
         .where(Transaction.year == year)
+        .where(Transaction.kind.in_(("expense", "income")))
         .group_by(Transaction.month, Transaction.kind)
     ).all()
     income = [0.0] * 12
     expenses = [0.0] * 12
     for m, kind, total in rows:
-        (income if kind == "income" else expenses)[m - 1] = float(total or 0)
+        if kind == "income":
+            income[m - 1] = float(total or 0)
+        elif kind == "expense":  # transfers are neither
+            expenses[m - 1] = float(total or 0)
     return pdf.yearly_pdf(
         settings.report_owner, year, income, expenses,
         _expense_categories(db, year, None), invested_in_period(db, year, None))

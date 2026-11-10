@@ -74,6 +74,12 @@ def start_scheduler() -> BackgroundScheduler:
     sched.add_job(_snapshot, CronTrigger(hour=23, minute=0),
                   id="snapshot", replace_existing=True)
 
+    # Daily bank sync at 08:00 (bank mode only).
+    if settings.bank_sync_enabled:
+        from app.services.bot import daily_sync_notice
+        sched.add_job(daily_sync_notice, CronTrigger(hour=8, minute=0),
+                      id="banksync", replace_existing=True)
+
     if settings.telegram_enabled:
         sched.add_job(_reminder, CronTrigger(day="last", hour=20, minute=0),
                       id="reminder", replace_existing=True)

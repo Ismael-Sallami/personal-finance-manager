@@ -57,3 +57,28 @@ def test_no_token_configured_disables_the_endpoints(client, monkeypatch):
     monkeypatch.setattr(settings, "tasks_token", "", raising=False)
     r = c.post("/tasks/snapshot", headers={"X-Tasks-Token": ""})
     assert r.status_code == 403
+
+
+def test_reminder_only_on_the_last_day(client, monkeypatch):
+    import datetime as dt
+
+    from app.services import bot
+    calls = []
+    monkeypatch.setattr(bot, "month_end_reminder", lambda: calls.append(1))
+
+    class D(dt.date):
+        today_value = dt.date(2026, 11, 28)
+
+        @classmethod
+        def today(cls):
+            return cls.today_value
+
+    monkeypatch.setattr(dt, "date", D)
+    c, _ = client
+    h = {"X-Tasks-Token": "secret"}
+    assert c.post("/tasks/reminder", headers=h).json()["sent"] is False
+    D.today_value = dt.date(2026, 11, 30)
+    assert c.post("/tasks/reminder", headers=h).json()["sent"] is True
+    D.today_value = dt.date(2026, 11, 28)
+    assert c.post("/tasks/reminder?force=1", headers=h).json()["sent"] is True
+    assert len(calls) == 2

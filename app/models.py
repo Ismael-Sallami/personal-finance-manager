@@ -59,10 +59,18 @@ class Transaction(Base):
     year: Mapped[int] = mapped_column(Integer, index=True)
     month: Mapped[int] = mapped_column(Integer, index=True)
     category: Mapped[str] = mapped_column(String(120), index=True)
-    kind: Mapped[str] = mapped_column(String(10))  # expense | income
+    kind: Mapped[str] = mapped_column(String(10))  # expense | income | transfer
     amount: Mapped[Decimal] = mapped_column(MONEY)
     note: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # --- Bank sync (defaults for entries typed by hand) ---
+    origin: Mapped[str] = mapped_column(String(20), default="manual", server_default="manual")
+    external_id: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
+    merchant: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    account: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # True = the category is a default guess that the user has not confirmed yet.
+    review: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
 
 
 class BrokerImport(Base):
@@ -148,3 +156,51 @@ class NetWorthSnapshot(Base):
     banks: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("0"))
     total: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("0"))
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class BankLink(Base):
+    """A bank account authorised through Enable Banking (PSD2, read-only).
+
+    `uid` is only valid while the session is authorised. When the consent is
+    renewed the bank returns a new uid, and the row is re-mapped through
+    `identification_hash`."""
+
+    __tablename__ = "bank_links"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bank: Mapped[str] = mapped_column(String(60), index=True)
+    session_id: Mapped[str] = mapped_column(String(64))
+    uid: Mapped[str] = mapped_column(String(64))
+    identification_hash: Mapped[str] = mapped_column(String(128), unique=True)
+    iban: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    valid_until: Mapped[dt.datetime] = mapped_column(DateTime)
+    last_sync: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    expiry_notified: Mapped[bool] = mapped_column(Boolean, default=False)
+    bank_account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("bank_accounts.id"), nullable=True
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CategoryRule(Base):
+    """A learned rule: if `pattern` (lower case) appears in the merchant or
+    description, the entry goes to `category`."""
+
+    __tablename__ = "category_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    pattern: Mapped[str] = mapped_column(String(120), unique=True)
+    category: Mapped[str] = mapped_column(String(120))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class Budget(Base):
+    """Monthly budget for one expense category."""
+
+    __tablename__ = "budgets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category: Mapped[str] = mapped_column(String(120), unique=True)
+    monthly_limit: Mapped[Decimal] = mapped_column(MONEY)
+    # "yyyy-mm:080" / "yyyy-mm:100": last alert sent, so it is not repeated.
+    last_alert: Mapped[str | None] = mapped_column(String(20), nullable=True)
