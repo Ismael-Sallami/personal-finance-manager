@@ -531,3 +531,33 @@ def test_long_breakdown_is_split_in_chunks(captured):
     chunks = bot_banks.breakdown_txt(today.year, today.month)
     assert len(chunks) > 1 and all(len(c) <= 4096 for c in chunks)
     assert "150 entries" in chunks[-1]
+
+
+def test_connect_other_bank_country_search_and_link(captured, monkeypatch):
+    from app.services import enablebanking
+    monkeypatch.setattr(settings, "eb_app_id", "app", raising=False)
+    monkeypatch.setattr(settings, "eb_private_key", "key", raising=False)
+    monkeypatch.setattr(settings, "public_base_url", "https://example.test", raising=False)
+    banks = [{"name": f"Bank {i:02d}"} for i in range(20)] + [{"name": "Openbank"}]
+    monkeypatch.setattr(enablebanking, "aspsps", lambda country: banks)
+    asked = []
+    monkeypatch.setattr(enablebanking, "start_auth",
+                        lambda b, r, s, c: asked.append((b, c)) or "https://auth.test/x")
+    _run(bot.handle_update(_msg("/connect")))
+    _run(bot.handle_update(_cb("k:+")))
+    assert "Which country" in _last(captured)[0]
+    _run(bot.handle_update(_cb("kp:PT")))
+    text, kb = _last(captured)
+    assert "Banks in PT" in text and "page 1/3" in text
+    _run(bot.handle_update(_cb(_button(captured, "▶"))))
+    assert "page 2/3" in _last(captured)[0]
+    _run(bot.handle_update(_msg("open")))                       # search by typing
+    _run(bot.handle_update(_cb(_button(captured, "Openbank"))))
+    assert asked == [("Openbank", "PT")] and "auth.test" in _last(captured)[0]
+    assert not bot_banks.waiting_for_bank()
+
+
+def test_another_command_cancels_the_bank_search(captured):
+    bot_banks._WAITING_BANK["country"] = "ES"
+    _run(bot.handle_update(_msg("/pace")))
+    assert not bot_banks.waiting_for_bank()

@@ -28,6 +28,7 @@ log = logging.getLogger("bot")
 BANKS = {"imagin": "imagin", "revolut": "Revolut", "myinvestor": "MyInvestor Banco",
          "traderepublic": "Trade Republic", "tr": "Trade Republic"}
 EXPIRY_WARNING_DAYS = 10
+HOURS = 4  # = bank_sync.HOURS_BETWEEN_QUERIES (for the text)
 
 OFF_TEXT = "🏦 Bank sync is off. See docs/BANK_SYNC.md (manual mode: just paste your entries)."
 
@@ -68,24 +69,30 @@ def redirect_url() -> str:
 
 
 # --- /connect ---
-def connect_txt(arg: str) -> str:
+EB_PANEL = "https://enablebanking.com/cp/applications"
+
+
+def connect_txt(arg: str, country: str = "ES") -> str:
+    """Authorisation link. `arg`: short key (imagin, revolut...) or the exact bank
+    name as Enable Banking lists it for that country."""
     if not settings.bank_sync_enabled:
         return OFF_TEXT
     key = (arg or "").strip().lower().replace(" ", "")
-    bank = BANKS.get(key)
+    bank = BANKS.get(key) or (arg or "").strip()
     if not bank:
-        return ("Usage: <code>/connect bank</code>\n"
-                "Banks: " + ", ".join(k for k in BANKS if k != "tr"))
+        return "Usage: <code>/connect</code> and pick the bank in the buttons."
     from app.services import enablebanking as eb
     try:
-        url = eb.start_auth(bank, redirect_url(), sign_state(bank))
+        url = eb.start_auth(bank, redirect_url(), sign_state(bank), country)
     except Exception as exc:
         log.warning("start_auth %s: %s", bank, exc)
         # Only the owner sees this (allowlist); the reason saves a trip to the logs.
         reason = html.escape(f"{type(exc).__name__}: {exc}"[:300])
-        return (f"⚠ Could not start the connection with {bank}.\n"
-                f"<code>{reason}</code>")
-    return (f"🔗 <b>Connect {bank}</b> (read-only)\n"
+        return (f"⚠ Could not start the connection with {html.escape(bank)}.\n"
+                f"<code>{reason}</code>\n\n"
+                f"If it is a new bank, link it first in the <a href=\"{EB_PANEL}\">Enable "
+                "Banking panel</a> (Activate by linking accounts).")
+    return (f"🔗 <b>Connect {html.escape(bank)}</b> (read-only)\n"
             f'<a href="{url}">Open this link</a>, press "Continue authentication" '
             "and approve at your bank. The link expires in a few minutes.")
 
@@ -99,6 +106,7 @@ def choose_bank() -> tuple[str, dict]:
     from app.services.bot import _kb
     rows = [[(t, f"k:{k}") for t, k in _BANK_BUTTONS[i:i + 2]]
             for i in range(0, len(_BANK_BUTTONS), 2)]
+    rows.append([("➕ Other bank", "k:+")])
     return ("🔗 <b>Which bank should I connect?</b>\nRead-only. If it was already "
             "connected, this renews the consent."), _kb(rows)
 
@@ -501,11 +509,11 @@ def pending_count(db) -> int:
 
 
 # --- Daily job ---
-def run_sync(db) -> dict:
+def run_sync(db, force: bool = False, only: list[str] | None = None) -> dict:
     """Sync and build the alerts. Sends nothing (the caller does)."""
     from app.services.bank_sync import sync_all
     today = _today()
-    res = sync_all(db, today)
+    res = sync_all(db, today, force=force, only=only)
     alerts: list[str] = []
     for tx in res.new:
         for f in (insights.unusual_alert, insights.subscription_alert):
@@ -528,7 +536,8 @@ def run_sync(db) -> dict:
             link.expiry_notified = True
     db.commit()
     return {"new": len(res.new), "transfers": res.transfers, "accounts": res.accounts,
-            "errors": res.errors, "alerts": alerts, "pending": pending_count(db)}
+            "errors": res.errors, "alerts": alerts, "pending": pending_count(db),
+            "skipped": res.skipped}
 
 
 def sync_text(r: dict, force: bool = False) -> str | None:
@@ -541,6 +550,10 @@ def sync_text(r: dict, force: bool = False) -> str | None:
     if force:
         parts.insert(0, f"🔄 Sync: {r['new']} new, {r['transfers']} transfers, "
                         f"{r['accounts']} accounts.")
+        if r.get("skipped"):
+            parts.insert(1, "⏳ Not querying " + ", ".join(sorted(set(r["skipped"])))
+                         + f" again: I did it less than {HOURS} h ago and banks only allow "
+                           "about 4 queries a day.")
     return "\n\n".join(parts) if parts else None
 
 
@@ -998,3 +1011,88 @@ def breakdown_callback(data: str) -> list[str]:
         return breakdown_txt(year, month, cats[int(choice)])
     except (ValueError, IndexError):
         return ["⚠ Invalid button."]
+
+
+# --- Connect any bank: country -> search/paginate -> link ---
+COUNTRIES = [("🇪🇸 Spain", "ES"), ("🇵🇹 Portugal", "PT"), ("🇫🇷 France", "FR"),
+             ("🇩🇪 Germany", "DE"), ("🇮🇹 Italy", "IT"), ("🇳🇱 Netherlands", "NL"),
+             ("🇧🇪 Belgium", "BE"), ("🇦🇹 Austria", "AT"), ("🇮🇪 Ireland", "IE"),
+             ("🇫🇮 Finland", "FI"), ("🇱🇹 Lithuania", "LT"), ("🇵🇱 Poland", "PL")]
+_BANKS_TOKEN: "OrderedDict[str, tuple[str, list[str]]]" = OrderedDict()
+_WAITING_BANK: dict[str, str] = {}  # "country" -> country to search in with what you type
+_BANKS_PER_PAGE = 8
+
+
+def choose_country() -> tuple[str, dict]:
+    from app.services.bot import _kb
+    rows = [[(t, f"kp:{c}") for t, c in COUNTRIES[i:i + 3]] for i in range(0, len(COUNTRIES), 3)]
+    return ("🌍 <b>Which country is the bank in?</b>\n"
+            "Another country? Type <code>/connect country XX</code> (2-letter code)."), _kb(rows)
+
+
+def _bank_page(token: str, country: str, names: list[str], page: int,
+               total_note: str = "") -> tuple[str, dict]:
+    from app.services.bot import _kb
+    start = page * _BANKS_PER_PAGE
+    rows = [[(n[:40], f"kl:{token}:{start + i}")]
+            for i, n in enumerate(names[start:start + _BANKS_PER_PAGE])]
+    nav = []
+    if page:
+        nav.append(("◀", f"kn:{token}:{page - 1}"))
+    if start + _BANKS_PER_PAGE < len(names):
+        nav.append(("▶", f"kn:{token}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    pages = (len(names) - 1) // _BANKS_PER_PAGE + 1
+    return (f"🏦 <b>Banks in {country}</b> ({len(names)}) · page {page + 1}/{pages}\n"
+            "Tap yours or <b>type part of the name</b> to search.\n"
+            f"<i>First link it in the <a href=\"{EB_PANEL}\">Enable Banking panel</a>.</i>"
+            ), _kb(rows)
+
+
+def banks_of(country: str, text_filter: str = "", page: int = 0) -> tuple[str, dict | None]:
+    """Paginated list of a country's banks, filterable by typing part of the name."""
+    from app.services import enablebanking as eb
+    from app.services.bank_sync import norm
+    try:
+        names = sorted(b["name"] for b in eb.aspsps(country))
+    except Exception as exc:
+        return (f"⚠ Could not list the banks of {html.escape(country)}: "
+                f"{html.escape(str(exc)[:150])}"), None
+    if text_filter:
+        names = [n for n in names if norm(text_filter) in norm(n)]
+    _WAITING_BANK["country"] = country
+    if not names:
+        return (f"🔎 No bank in {country} contains “{html.escape(text_filter)}”. "
+                "Type another part of the name."), None
+    token = secrets.token_urlsafe(6)
+    _BANKS_TOKEN[token] = (country, names)
+    while len(_BANKS_TOKEN) > 30:
+        _BANKS_TOKEN.popitem(last=False)
+    return _bank_page(token, country, names, page)
+
+
+def banks_callback(data: str) -> tuple[str, dict | None]:
+    prefix, token, value = (data.split(":", 2) + ["", ""])[:3]
+    if prefix == "kp":
+        return banks_of(token)  # here token = country code
+    saved = _BANKS_TOKEN.get(token)
+    if not saved:
+        return "⚠ Expired. Use /connect again.", None
+    country, names = saved
+    try:
+        n = int(value)
+    except ValueError:
+        return "⚠ Invalid button.", None
+    if prefix == "kn":  # the saved list is already filtered: paginate over it
+        return _bank_page(token, country, names, n)
+    try:
+        name = names[n]
+    except IndexError:
+        return "⚠ Invalid button.", None
+    _WAITING_BANK.clear()
+    return connect_txt(name, country), None
+
+
+def waiting_for_bank() -> bool:
+    return "country" in _WAITING_BANK

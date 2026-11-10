@@ -346,6 +346,9 @@ async def handle_update(update: dict) -> None:
 
     # "/command@MyBot" (groups or autocomplete) -> "/command"
     cmd = cmd.split("@", 1)[0]
+    if cmd.startswith("/") and cmd != "/connect":
+        from app.services import bot_banks as bb
+        bb._WAITING_BANK.clear()  # another command cancels the bank search
 
     if cmd in ("/start", "/menu"):
         text_, kb = _menu_text()
@@ -382,6 +385,11 @@ async def handle_update(update: dict) -> None:
         await send_message(chat_id, "Command not recognised. /help")
     else:
         from app.services import bot_banks as bb
+        if bb.waiting_for_bank() and ":" not in text and "\n" not in text \
+                and not bb.waiting_for_category():  # search in "➕ Other bank"
+            text_, kb = bb.banks_of(bb._WAITING_BANK["country"], text)
+            await send_message(chat_id, text_, reply_markup=kb)
+            return
         if bb.waiting_for_category() and (":" in text or "\n" in text):
             bb._WAITING.clear()  # these are entries, not a name: forget the wait
         if bb.waiting_for_category():  # reply to "✏️ Other category"
@@ -456,6 +464,16 @@ async def _handle_callback(cb: dict) -> None:
         await edit_message_text(chat_id, message_id, text_, reply_markup=kb)
         return
 
+    if data == "k:+":  # /connect -> ➕ Other bank
+        from app.services import bot_banks as bb
+        text_, kb = bb.choose_country()
+        await edit_message_text(chat_id, message_id, text_, reply_markup=kb)
+        return
+    if data.startswith(("kp:", "kl:", "kn:")):
+        from app.services import bot_banks as bb
+        text_, kb = bb.banks_callback(data)
+        await edit_message_text(chat_id, message_id, text_, reply_markup=kb)
+        return
     if data.startswith("k:"):  # bank button in /connect
         from app.services import bot_banks as bb
         await edit_message_text(chat_id, message_id, bb.connect_txt(data[2:]))
@@ -520,7 +538,11 @@ async def _banks_cmd(chat_id, cmd: str, arg: str) -> None:
     elif cmd == "/budget":
         await send_message(chat_id, bb.budget_txt(arg))
     elif cmd == "/connect":
-        if arg.strip():
+        parts = arg.split()
+        if len(parts) == 2 and parts[0].lower() == "country" and len(parts[1]) == 2:
+            text, kb = bb.banks_of(parts[1].upper())
+            await send_message(chat_id, text, reply_markup=kb)
+        elif arg.strip():
             await send_message(chat_id, bb.connect_txt(arg))
         else:
             text, kb = bb.choose_bank()
@@ -553,7 +575,7 @@ async def _banks_cmd(chat_id, cmd: str, arg: str) -> None:
         def _run():
             db = SessionLocal()
             try:
-                return bb.run_sync(db)
+                return bb.run_sync(db, force=True)
             finally:
                 db.close()
         r = await asyncio.to_thread(_run)
@@ -840,7 +862,7 @@ def month_end_reminder() -> None:
         if bb.has_banks(db):
             if settings.bank_sync_enabled:
                 try:
-                    bb.run_sync(db)  # so the close includes today's movements
+                    bb.run_sync(db, force=True)  # so the close includes today's movements
                 except Exception as exc:
                     log.warning("sync before the close failed: %s", exc)
             text, img = bb.month_end_summary(db, today)

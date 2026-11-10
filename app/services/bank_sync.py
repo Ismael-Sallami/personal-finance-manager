@@ -37,6 +37,25 @@ TRANSFER = "Transfer"
 # Edit this list to match the banks you use.
 OWN_BANKS = ("revolut", "trade republic", "myinvestor", "imagin")
 
+def investment_platforms() -> tuple[str, ...]:
+    """Platforms used only to invest (setting INVESTMENT_BANKS, comma list)."""
+    return tuple(p for p in (norm(x) for x in settings.investment_banks.split(",")) if p)
+
+
+def is_platform(bank: str | None) -> bool:
+    return any(p in norm(bank) for p in investment_platforms())
+
+
+def goes_to_investment(text: str, bank: str) -> bool:
+    t = norm(text)
+    return any(p in t for p in investment_platforms() if p not in norm(bank))
+
+
+def investment_category(existing: list[str]) -> str:
+    from app.services.aggregation import INVESTMENT_CATEGORIES
+    return next((c for c in existing if c.lower() in INVESTMENT_CATEGORIES), "Investment")
+
+
 # Internal movements the bank does not flag as transfers: savings pots, interest
 # accounts, currency exchange, top-ups (mostly Revolut).
 TRANSFER_KEYS = (
@@ -84,6 +103,7 @@ class SyncResult:
     errors: list[str] = field(default_factory=list)
     accounts: int = 0
     reclassified: int = 0
+    skipped: list[str] = field(default_factory=list)
 
 
 def _sha(text: str) -> str:
@@ -328,6 +348,8 @@ def _account_for(db: Session, link: BankLink) -> BankAccount:
 def save_movements(db: Session, link: BankLink, raws: list[dict],
                    own_ibans: set[str], res: SyncResult) -> None:
     """Normalise, deduplicate, classify and insert. Does not commit."""
+    if is_platform(link.bank):
+        return  # investment platform: only its balance (sync_all sets it)
     rules = user_rules(db)
     expense_only = expense_only_categories(db)
     existing_cats = existing_categories(db)
@@ -342,7 +364,10 @@ def save_movements(db: Session, link: BankLink, raws: list[dict],
         if m.external_id in known:
             continue
         known.add(m.external_id)
-        if is_transfer(m, own_ibans, link.bank):
+        if m.kind == "expense" and goes_to_investment(
+                f"{m.merchant} {m.description}", link.bank):
+            kind, cat, review = "expense", investment_category(existing_cats), False
+        elif is_transfer(m, own_ibans, link.bank):
             kind, cat, review = "transfer", TRANSFER, False
             res.transfers += 1
         else:
@@ -362,8 +387,20 @@ def save_movements(db: Session, link: BankLink, raws: list[dict],
             res.new.append(tx)
 
 
-def sync_all(db: Session, today: date | None = None, client=None) -> SyncResult:
-    """Sync every linked account whose consent is still valid."""
+# PSD2: without the user present, the bank may cap queries at ~4 per day per
+# account (a 429 error). Each sync spends 2 (movements + balance), so the daily
+# job queries each bank once a day and a manual /sync only does it if
+# HOURS_BETWEEN_QUERIES have passed since that bank's last query.
+HOURS_BETWEEN_QUERIES = 4
+_LAST_QUERY: dict[int, datetime] = {}
+
+
+def sync_all(db: Session, today: date | None = None, client=None,
+             force: bool = False, only: list[str] | None = None) -> SyncResult:
+    """Sync the linked accounts whose consent is still valid.
+
+    force: query even if it was already done today (if a few hours have passed).
+    only: limit to those banks (e.g. the one just connected)."""
     from app.services import enablebanking as eb_default
     eb = client or eb_default
     today = today or date.today()
@@ -372,9 +409,19 @@ def sync_all(db: Session, today: date | None = None, client=None) -> SyncResult:
     links = db.scalars(select(BankLink)).all()
     ibans = {link.iban.replace(" ", "") for link in links if link.iban}
     for link in links:
+        if only and link.bank not in only:
+            continue
         if link.valid_until and link.valid_until < now:
             res.errors.append(f"{link.bank}: consent expired")
             continue
+        last = _LAST_QUERY.get(link.id)
+        if force and last and now - last < timedelta(hours=HOURS_BETWEEN_QUERIES):
+            res.skipped.append(link.bank)
+            continue
+        if not force and link.last_sync == today:
+            res.skipped.append(link.bank)
+            continue
+        _LAST_QUERY[link.id] = now
         try:
             raws = eb.transactions(link.uid, start_date(link, today))
             save_movements(db, link, raws, ibans, res)
@@ -389,7 +436,11 @@ def sync_all(db: Session, today: date | None = None, client=None) -> SyncResult:
         except Exception as exc:  # one broken account does not stop the others
             db.rollback()
             log.warning("sync %s failed: %s", link.bank, exc)
-            res.errors.append(f"{link.bank}: {str(exc)[:120]}")
+            if "429" in str(exc):
+                res.errors.append(f"{link.bank}: the bank has reached its query limit for "
+                                  "today (PSD2: ~4/day). It retries on its own tomorrow.")
+            else:
+                res.errors.append(f"{link.bank}: {str(exc)[:120]}")
     res.reclassified = reclassify_pending(db)
     if res.accounts:
         from app.services.aggregation import snapshot_today
@@ -408,6 +459,10 @@ def reclassify_pending(db: Session) -> int:
     for tx in db.scalars(select(Transaction).where(Transaction.review.is_(True),
                                                    Transaction.origin == "bank")).all():
         text = f"{tx.merchant} {tx.note}"
+        if is_platform(tx.account):  # e.g. the "Unknown" rows of an investment platform
+            tx.kind, tx.category, tx.review = "transfer", TRANSFER, False
+            n += 1
+            continue
         if text_is_transfer(text, tx.account or ""):
             tx.kind, tx.category, tx.review = "transfer", TRANSFER, False
             n += 1

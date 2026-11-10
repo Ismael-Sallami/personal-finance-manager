@@ -64,6 +64,11 @@ link, press "Continue authentication" and approve at your bank. The callback
 saves the session, imports the movements and the bot confirms. `/connections`
 shows the days left for each consent.
 
+Your bank is not in the buttons? Press "➕ Other bank", pick the country (or type
+`/connect country XX`), then tap the bank in the paginated list or type part of
+its name. Link it first in the Enable Banking control panel ("Activate by linking
+accounts"); the bot reminds you with a link. Any other command cancels the search.
+
 The first imports leave some entries as "Uncategorized". Use `/pending`: answer
 with a button and the app stores a rule for that merchant brand, so the next
 charge is classified on its own. Bizum is never classified automatically.
@@ -85,6 +90,23 @@ answers 500 when an account fails.
 Also schedule `POST /tasks/reminder` on days 28 to 31: it only sends on the last
 day of the month (the month-end close with a chart in bank mode, the paste
 reminder in manual mode). `?force=1` sends it anyway.
+
+### Query limits (PSD2)
+
+Without you present, banks may allow only about 4 queries a day per account (a
+429 error). Each sync spends 2, so the daily job queries each bank once a day,
+and a manual `/sync` or the month-end close only queries a bank again if 4 hours
+have passed since its last query. Connecting a bank syncs only that bank. A 429
+is reported in plain words and retried the next day.
+
+### Investment platforms
+
+`INVESTMENT_BANKS` (comma list, default `trade republic,myinvestor`) names the
+platforms you only use to invest. Money you send to them from a spending account
+is stored as an "Investment" expense (your existing name for it if you have one),
+not as a transfer. Their own movements (ETF buys, savings plans) are ignored: only
+their cash balance is read. Pending rows from those accounts are retired. Set it
+empty if you do not want this.
 
 ## 5. Renewing the consent
 
