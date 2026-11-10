@@ -108,6 +108,17 @@ not as a transfer. Their own movements (ETF buys, savings plans) are ignored: on
 their cash balance is read. Pending rows from those accounts are retired. Set it
 empty if you do not want this.
 
+Investment platforms are tracked as invested capital, not valued positions: each
+one has an account of kind "investment". Money you send to a platform from a
+spending account adds to it, money coming back subtracts (never below 0), and
+`/invested [platform amount]` sets it by hand ("1.500,50" and "1500.50" both
+work). When any exist, net worth uses them instead of valued positions (no P&L)
+and the bank totals and `/banks` leave them out. For platforms that cannot be read
+(not connected, or the connector is still beta at Enable Banking) the bot asks
+for the amount if not confirmed in 30 days, in `/networth`, `/banks`, the month
+close and the day-1 sync, and tells you when the connector stops being beta
+(`BANK_COUNTRY`, default ES, is the country it looks them up in).
+
 ### Bank roles
 
 Each connected bank has a role, shown in `/connections` (tap "⚙ bank" to change

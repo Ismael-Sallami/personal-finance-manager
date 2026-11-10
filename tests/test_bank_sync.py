@@ -310,7 +310,8 @@ def test_investment_platforms(db, link):
     assert (txs["imagin:inv1"].kind, txs["imagin:inv1"].category) == ("expense", "Investment")
     assert "Trade Republic:etf1" not in txs                 # internal buys: ignored
     assert txs["old-tr"].kind == "transfer" and not txs["old-tr"].review
-    tr_acc = db.scalar(select(BankAccount).where(BankAccount.name == "Trade Republic"))
+    tr_acc = db.scalar(select(BankAccount).where(BankAccount.name == "Trade Republic",
+                                                    BankAccount.kind == "account"))
     assert tr_acc.balance == Decimal("1234.56")             # its balance does count
 
 

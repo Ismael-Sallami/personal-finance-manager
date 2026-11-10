@@ -80,6 +80,37 @@ def goes_to_investment(text: str, bank: str) -> bool:
     return any(p in t for p in platforms() if p not in norm(bank))
 
 
+PLATFORM_NAMES = {"trade republic": "Trade Republic", "myinvestor": "MyInvestor"}
+
+
+def platform_in(text: str, bank: str) -> str | None:
+    """Display name of the investment platform that appears in `text`."""
+    t = norm(text)
+    for p in sorted(platforms(), key=len, reverse=True):
+        if p in t and p not in norm(bank):
+            return PLATFORM_NAMES.get(p, p.title())
+    return None
+
+
+def investment_account(db: Session, platform: str) -> BankAccount:
+    """The "invested capital" account of a platform (created if missing)."""
+    from app.services.aggregation import INVESTMENT_KIND
+    acc = db.scalar(select(BankAccount).where(BankAccount.kind == INVESTMENT_KIND,
+                                              func.lower(BankAccount.name) == platform.lower()))
+    if acc is None:
+        acc = BankAccount(name=platform, kind=INVESTMENT_KIND, balance=Decimal("0"))
+        db.add(acc)
+        db.flush()
+    return acc
+
+
+def move_capital(db: Session, platform: str, amount: Decimal) -> None:
+    """Add (contribution) or subtract (withdrawal) invested capital; never below 0.
+    It does not touch updated_at: that date is your last manual confirmation."""
+    acc = investment_account(db, platform)
+    acc.balance = max(Decimal("0"), (acc.balance or Decimal("0")) + amount)
+
+
 def investment_category(existing: list[str]) -> str:
     from app.services.aggregation import INVESTMENT_CATEGORIES
     return next((c for c in existing if c.lower() in INVESTMENT_CATEGORIES), "Investment")
@@ -370,7 +401,8 @@ def _account_for(db: Session, link: BankLink) -> BankAccount:
         name = link.bank
     else:  # several accounts at the same bank: one each (no IBAN -> by uid)
         name = f"{link.bank} …{(link.iban or link.identification_hash)[-4:]}"
-    acc = db.scalar(select(BankAccount).where(func.lower(BankAccount.name) == name.lower()))
+    acc = db.scalar(select(BankAccount).where(func.lower(BankAccount.name) == name.lower(),
+                                              BankAccount.kind != "investment"))
     if acc is None:
         acc = BankAccount(name=name, kind="account", balance=Decimal("0"))
         db.add(acc)
@@ -398,9 +430,14 @@ def save_movements(db: Session, link: BankLink, raws: list[dict],
         if m.external_id in known:
             continue
         known.add(m.external_id)
-        if m.kind == "expense" and goes_to_investment(
-                f"{m.merchant} {m.description}", link.bank):
+        target = platform_in(f"{m.merchant} {m.description}", link.bank)
+        if m.kind == "expense" and target:
             kind, cat, review = "expense", investment_category(existing_cats), False
+            move_capital(db, target, m.amount)       # contribution
+        elif m.kind == "income" and target:
+            kind, cat, review = "transfer", TRANSFER, False
+            move_capital(db, target, -m.amount)      # withdrawal to your account
+            res.transfers += 1
         elif is_transfer(m, own_ibans, link.bank):
             kind, cat, review = "transfer", TRANSFER, False
             res.transfers += 1

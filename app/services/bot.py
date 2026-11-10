@@ -102,6 +102,7 @@ COMMANDS = [
     ("savings", "Savings of the period [mm/yyyy]"),
     ("cashflow", "Income vs expenses of the year [yyyy]"),
     ("networth", "Investments + banks"),
+    ("invested", "Invested capital per platform [name amount]"),
     ("banks", "Balance of each account"),
     ("bank", "Set a balance by hand: name balance"),
     ("sync", "Fetch the bank movements now"),
@@ -291,6 +292,7 @@ HELP = (
     "/summary [mm/yyyy] — income, expenses, savings, net worth\n"
     "/net [mm/yyyy | yyyy | mm/yyyy mm/yyyy] — income, expenses and net (ranges allowed)\n"
     "/networth — investments and banks\n"
+    "/invested [platform amount] — invested capital (Trade Republic, MyInvestor...)\n"
     "/banks — balance per account\n"
     "/bank &lt;name&gt; &lt;balance&gt; — update an account\n"
     "/expenses [mm/yyyy] — expenses by category\n"
@@ -516,7 +518,7 @@ async def _handle_callback(cb: dict) -> None:
 # --- Bank sync / analysis commands (bot_banks.py) ---
 _BANK_CMDS = {"/pace", "/merchants", "/subscriptions", "/pending", "/budget",
               "/connect", "/connections", "/sync", "/disconnect", "/categories", "/move",
-              "/breakdown"}
+              "/breakdown", "/invested"}
 # Commands that only make sense with the bank connected (else: "bank sync is off").
 _NEEDS_BANK = {"/connect", "/connections", "/sync", "/disconnect"}
 # menu callback -> command
@@ -558,6 +560,8 @@ async def _banks_cmd(chat_id, cmd: str, arg: str) -> None:
         else:
             text, kb = bb.choose_bank()
             await send_message(chat_id, text, reply_markup=kb)
+    elif cmd == "/invested":
+        await send_message(chat_id, bb.invested_txt(arg))
     elif cmd == "/connections":
         await send_message(chat_id, bb.connections_txt(), reply_markup=bb.connections_kb())
     elif cmd == "/breakdown":
@@ -631,12 +635,25 @@ def _net_worth_txt() -> str:
         k = build_dashboard(db)["kpis"]
     finally:
         db.close()
+    from app.services import bot_banks as bb
+    from app.services.aggregation import invested_capital
+    db = SessionLocal()
+    try:
+        caps = [(c.name, c.balance) for c in invested_capital(db)]
+        notices = bb.investment_notices(db)
+    finally:
+        db.close()
+    if caps:  # invested capital per platform (no market valuation)
+        rows = "\n".join(f"   {n}: {money(v)}" for n, v in caps)
+        block = f"📈 <b>Invested</b>: {money(k['inv_value'])}\n{rows}\n"
+    else:
+        block = (f"📈 <b>Investments</b>: {money(k['inv_value'])}\n"
+                 f"   Invested: {money(k['inv_invested'])}\n"
+                 f"   Profit: {money(k['inv_profit'])} ({k['return_pct']} %)\n")
     return (
-        f"💼 <b>Net worth: {money(k['net_worth'])}</b>\n\n"
-        f"📈 <b>Investments</b>: {money(k['inv_value'])}\n"
-        f"   Invested: {money(k['inv_invested'])}\n"
-        f"   Profit: {money(k['inv_profit'])} ({k['return_pct']} %)\n"
+        f"💼 <b>Net worth: {money(k['net_worth'])}</b>\n\n" + block +
         f"🏦 <b>Banks and cash</b>: {money(k['bank_balance'])}"
+        + ("\n\n" + "\n".join(notices) if notices else "")
     )
 
 
@@ -644,14 +661,19 @@ def _banks_txt() -> str:
     from app.models import BankAccount
     db = SessionLocal()
     try:
-        accounts = db.scalars(select(BankAccount).order_by(BankAccount.balance.desc())).all()
-        total = db.scalar(select(func.sum(BankAccount.balance))) or Decimal("0")
+        from app.services import bot_banks as bb
+        from app.services.aggregation import INVESTMENT_KIND
+        accounts = db.scalars(select(BankAccount).where(BankAccount.kind != INVESTMENT_KIND)
+                              .order_by(BankAccount.balance.desc())).all()
+        total = sum((a.balance for a in accounts), Decimal("0"))
         lines = "\n".join(f"• {a.name}: {money(a.balance)}" for a in accounts)
+        notices = bb.investment_notices(db)
     finally:
         db.close()
+    extra = ("\n\n" + "\n".join(notices)) if notices else ""
     if not lines:
-        return "🏦 No accounts yet. Add one with <code>/bank Savings 1500</code>"
-    return f"🏦 <b>Banks</b>\n{lines}\n\n<b>Total: {money(total)}</b>"
+        return "🏦 No accounts yet. Add one with <code>/bank Savings 1500</code>" + extra
+    return f"🏦 <b>Banks</b>\n{lines}\n\n<b>Total: {money(total)}</b>\n📈 /invested{extra}"
 
 
 def _bank_set(arg: str) -> str:

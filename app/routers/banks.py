@@ -21,7 +21,7 @@ from app.templating import templates
 
 router = APIRouter(prefix="/banks")
 
-KINDS = ["account", "savings", "cash"]
+KINDS = ["account", "savings", "cash", "investment"]
 
 
 def _num(raw, default="0") -> Decimal:

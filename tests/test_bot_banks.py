@@ -609,3 +609,51 @@ def test_roles_from_connections(captured, bank_on):
     _run(bot.handle_update(_cb("rs:main:Revolut")))
     roles = {link.bank: link.role for link in S().scalars(select(BankLink))}
     assert roles == {"imagin": "secondary", "Revolut": "main"}  # only one main
+
+
+def test_invested_capital_contribution_withdrawal_and_net_worth(db):
+    from app.models import BankAccount
+    from app.services import bank_sync as bs
+    from app.services.aggregation import build_dashboard, total_banks
+    db.add(BankLink(bank="imagin", session_id="s", uid="u1", identification_hash="h1",
+                    valid_until=datetime(2030, 1, 1)))
+    db.add(BankAccount(name="imagin", balance=Decimal("0")))
+    db.commit()
+
+    class EB:
+        def transactions(self, uid, d):
+            base = {"credit_debit_indicator": "DBIT", "booking_date": date.today().isoformat(),
+                    "status": "BOOK"}
+            return [{**base, "transaction_amount": {"amount": "300"}, "transaction_id": "a",
+                     "creditor": {"name": "MyInvestor Banco"}},
+                    {**base, "transaction_amount": {"amount": "50"}, "transaction_id": "b",
+                     "credit_debit_indicator": "CRDT", "debtor": {"name": "MyInvestor Banco"}}]
+
+        def balances(self, uid):
+            return [{"balance_type": "CLBD", "balance_amount": {"amount": "1000"}}]
+    bs.sync_all(db, client=EB())
+    cap = bs.investment_account(db, "MyInvestor")
+    assert cap.balance == Decimal("250")                  # +300 contributed, -50 withdrawn
+    assert total_banks(db) == 1000.0                      # the capital is not a bank balance
+    k = build_dashboard(db)["kpis"]
+    assert k["inv_value"] == 250.0 and k["net_worth"] == 1250.0 and k["inv_profit"] == 0
+
+
+def test_invested_command_and_beta_notice(captured, monkeypatch):
+    from app.services import enablebanking
+    monkeypatch.setattr(settings, "eb_app_id", "app", raising=False)
+    monkeypatch.setattr(settings, "eb_private_key", "key", raising=False)
+    beta = {"v": True}
+    monkeypatch.setattr(enablebanking, "aspsps",
+                        lambda country: [{"name": "MyInvestor Banco", "beta": beta["v"]},
+                                         {"name": "Trade Republic", "beta": False}])
+    _run(bot.handle_update(_msg("/networth")))
+    assert "How much do you have invested in <b>MyInvestor</b>?" in captured["msgs"][-1][1]
+    _run(bot.handle_update(_msg("/invested MyInvestor 1.500,50")))
+    t = captured["msgs"][-1][1]
+    assert "MyInvestor: 1,500.50 €" in t
+    assert "How much do you have invested in <b>MyInvestor" not in t
+    beta["v"] = False
+    bot_banks._BETA_CACHE.clear()
+    _run(bot.handle_update(_msg("/banks")))
+    assert "MyInvestor is no longer in beta" in captured["msgs"][-1][1]

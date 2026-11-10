@@ -19,14 +19,31 @@ def _f(x) -> float:
     return float(x or 0)
 
 
+# Accounts of kind "investment" = capital invested in each platform (Trade
+# Republic, MyInvestor...). When they exist they take precedence over valued
+# positions: PSD2 cannot give the real value of a portfolio.
+INVESTMENT_KIND = "investment"
+
+
 def total_banks(db: Session) -> float:
-    """Sum of every account balance, cash included."""
-    return _f(db.scalar(select(func.sum(BankAccount.balance))))
+    """Sum of account/cash balances (without the invested capital)."""
+    return _f(db.scalar(select(func.sum(BankAccount.balance))
+                        .where(BankAccount.kind != INVESTMENT_KIND)))
+
+
+def invested_capital(db: Session) -> list[BankAccount]:
+    return db.scalars(select(BankAccount).where(BankAccount.kind == INVESTMENT_KIND)
+                      .order_by(BankAccount.balance.desc())).all()
 
 
 def _net_worth_parts(db: Session) -> tuple[float, float]:
-    """(investment value [latest valuation per broker], total bank balance)."""
-    inv_value = sum(_f(inv.current_value) for inv in latest_investments(db))
+    """(investments, total bank balance). Investments = capital invested per
+    platform if there is any; otherwise the latest valuation per broker."""
+    cap = invested_capital(db)
+    if cap:
+        inv_value = sum(_f(c.balance) for c in cap)
+    else:
+        inv_value = sum(_f(inv.current_value) for inv in latest_investments(db))
     return inv_value, total_banks(db)
 
 
@@ -206,9 +223,15 @@ def build_dashboard(db: Session, year: int | None = None, month: int | None = No
         inv_invested += _f(inv.invested)
         inv_profit += _f(inv.profit)
     return_pct = (inv_profit / inv_invested * 100) if inv_invested else 0.0
+    cap = invested_capital(db)
+    if cap:  # invested-capital mode: no valuation, no P&L
+        inv_by_broker = defaultdict(float, {c.name: _f(c.balance) for c in cap})
+        inv_value = inv_invested = sum(_f(c.balance) for c in cap)
+        inv_profit = return_pct = 0.0
 
     # --- Banks and cash ---
-    banks = db.scalars(select(BankAccount).order_by(BankAccount.balance.desc())).all()
+    banks = db.scalars(select(BankAccount).where(BankAccount.kind != INVESTMENT_KIND)
+                       .order_by(BankAccount.balance.desc())).all()
     bank_value = sum(_f(b.balance) for b in banks)
 
     net_worth = inv_value + bank_value
