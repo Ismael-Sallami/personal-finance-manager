@@ -439,6 +439,17 @@ async def _handle_callback(cb: dict) -> None:
             await send_message(chat_id, HELP)
         return
 
+    if data.startswith(("par:", "rl:", "rs:")):  # mirror pairs and bank roles
+        from app.services import bot_banks as bb
+        if data.startswith("par:"):
+            text_, kb = bb.answer_pair(data)
+        elif data.startswith("rl:"):
+            text_, kb = bb.choose_role(data[3:])
+        else:
+            _, role, bank = data.split(":", 2)
+            text_, kb = bb.set_role(role, bank), bb.connections_kb()
+        await edit_message_text(chat_id, message_id, text_, reply_markup=kb)
+        return
     if data.startswith("dg:"):  # /breakdown: first part in the card, the rest apart
         from app.services import bot_banks as bb
         chunks = bb.breakdown_callback(data)
@@ -548,7 +559,7 @@ async def _banks_cmd(chat_id, cmd: str, arg: str) -> None:
             text, kb = bb.choose_bank()
             await send_message(chat_id, text, reply_markup=kb)
     elif cmd == "/connections":
-        await send_message(chat_id, bb.connections_txt())
+        await send_message(chat_id, bb.connections_txt(), reply_markup=bb.connections_kb())
     elif cmd == "/breakdown":
         # /breakdown [mm/yyyy | yyyy] [category or merchant]
         toks = arg.split()

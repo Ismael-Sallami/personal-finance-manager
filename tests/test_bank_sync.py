@@ -293,6 +293,7 @@ def test_429_gives_a_clear_message(db, link):
 
 def test_investment_platforms(db, link):
     tr = BankLink(bank="Trade Republic", session_id="s", uid="tr", identification_hash="htr",
+                  role="investment",
                   valid_until=datetime(2030, 1, 1))
     db.add(tr)
     db.add(Transaction(date=date(2026, 11, 1), year=2026, month=11, kind="expense",

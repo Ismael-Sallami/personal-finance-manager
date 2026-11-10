@@ -123,12 +123,52 @@ def connections_txt() -> str:
             acct = f" …{link.iban[-4:]}" if link.iban else ""
             sync = link.last_sync.strftime("%d/%m") if link.last_sync else "never"
             state = "expired" if days < 0 else f"{days} days"
-            rows.append(f"{icon} {link.bank}{acct}: {state} · last sync {sync}")
+            from app.services.bank_sync import ROLES
+            rows.append(f"{icon} <b>{html.escape(link.bank)}</b>{acct} · "
+                        f"{ROLES.get(link.role, link.role)}\n"
+                        f"     consent {state} · last sync {sync}")
     finally:
         db.close()
     if not rows:
         return "🏦 No banks connected. Use <code>/connect imagin</code>"
-    return "🏦 <b>Connections</b>\n" + "\n".join(rows)
+    return "🏦 <b>Connections</b>\n" + "\n".join(rows) + "\n\nTap a bank to change its role."
+
+
+def connections_kb():
+    from app.services.bot import _kb
+    db = _db()
+    try:
+        banks = sorted(set(db.scalars(select(BankLink.bank)).all()))
+    finally:
+        db.close()
+    return _kb([[(f"⚙ {b}", f"rl:{b}")] for b in banks]) if banks else None
+
+
+def choose_role(bank: str) -> tuple[str, dict]:
+    from app.services.bank_sync import ROLES
+    from app.services.bot import _kb
+    rows = [[(t, f"rs:{r}:{bank}")] for r, t in ROLES.items()]
+    return (f"⚙ <b>{html.escape(bank)}</b>: what role does it have?\n"
+            "⭐ Main / 💳 Secondary: spending accounts.\n"
+            "📈 Investment: what you send there counts as Investment and its internal "
+            "movements are ignored.\n🐷 Savings: what you move there is a transfer."), _kb(rows)
+
+
+def set_role(role: str, bank: str) -> str:
+    from app.services.bank_sync import ROLES
+    if role not in ROLES:
+        return "⚠ Invalid role."
+    db = _db()
+    try:
+        if role == "main":  # only one main
+            for link in db.scalars(select(BankLink).where(BankLink.role == "main")).all():
+                link.role = "secondary"
+        for link in db.scalars(select(BankLink).where(BankLink.bank == bank)).all():
+            link.role = role
+        db.commit()
+    finally:
+        db.close()
+    return f"✅ {html.escape(bank)} → {ROLES[role]}\n\n" + connections_txt()
 
 
 # --- Pace / comparison / merchants / subscriptions ---
@@ -371,6 +411,10 @@ def next_pending(previous: str = "", tx_id: int | None = None) -> tuple[str, dic
         q = select(Transaction).where(Transaction.review.is_(True))
         if _SKIPPED:
             q = q.where(Transaction.id.notin_(tuple(_SKIPPED)))
+        if not tx_id:
+            pair = _pair_card(db, header)
+            if pair:
+                return pair
         tx = db.get(Transaction, tx_id) if tx_id else None
         if tx is None or not tx.review:
             tx = db.scalar(q.order_by(Transaction.date.desc()))
@@ -535,6 +579,11 @@ def run_sync(db, force: bool = False, only: list[str] | None = None) -> dict:
                           f"{link.valid_until:%d/%m}. Renew it with <code>/connect {key}</code>")
             link.expiry_notified = True
     db.commit()
+    from app.services.bank_sync import detect_pairs
+    pairs = len(detect_pairs(db))
+    if pairs:
+        alerts.append(f"🔁 {pairs} possible transfer(s) between your accounts (salary moved to "
+                      "another bank?). Confirm in /pending")
     return {"new": len(res.new), "transfers": res.transfers, "accounts": res.accounts,
             "errors": res.errors, "alerts": alerts, "pending": pending_count(db),
             "skipped": res.skipped}
@@ -1096,3 +1145,50 @@ def banks_callback(data: str) -> tuple[str, dict | None]:
 
 def waiting_for_bank() -> bool:
     return "country" in _WAITING_BANK
+
+
+# --- Mirror pairs (transfers between your accounts that were not recognised) ---
+_PAIRS: "OrderedDict[str, tuple[int, int]]" = OrderedDict()
+
+
+def _pair_card(db, header: str = "") -> tuple[str, dict] | None:
+    from app.services.bank_sync import detect_pairs
+    from app.services.bot import _kb
+    pairs = detect_pairs(db)
+    if not pairs:
+        return None
+    out_id, in_id = pairs[0]
+    out, inc = db.get(Transaction, out_id), db.get(Transaction, in_id)
+    token = secrets.token_urlsafe(6)
+    _PAIRS[token] = (out_id, in_id)
+    while len(_PAIRS) > 30:
+        _PAIRS.popitem(last=False)
+
+    def line(t, sign):
+        return (f"{t.date:%d/%m} · {html.escape(t.account or '')}: "
+                f"<b>{sign}{money(t.amount)}</b> {html.escape((t.merchant or '')[:30])}")
+
+    text = (header + "🔁 <b>Is this the same money moving between your accounts?</b>"
+            + (f"  ({len(pairs)})" if len(pairs) > 1 else "") + "\n\n"
+            + line(out, "−") + "\n" + line(inc, "+") +
+            "\n\nIf it is your own transfer (e.g. moving your salary from one bank to "
+            "another), it counts neither as expense nor as income.")
+    return text, _kb([[("✅ Yes, my own transfer", f"par:{token}:yes")],
+                      [("❌ No, they are different", f"par:{token}:no")]])
+
+
+def answer_pair(data: str) -> tuple[str, dict | None]:
+    from app.services.bank_sync import resolve_pair
+    _, token, answer = (data.split(":", 2) + ["", ""])[:3]
+    pair = _PAIRS.pop(token, None)
+    if not pair:
+        return "⚠ Expired. Use /pending again.", None
+    db = _db()
+    try:
+        resolve_pair(db, *pair, is_transfer=(answer == "yes"))
+    finally:
+        db.close()
+    previous = ("🔄 Done: transfer between your accounts, not counted twice." if answer == "yes"
+                else "👍 Understood, they are different. I will not ask again.")
+    _SESSION["done"] += 1
+    return next_pending(previous=previous)

@@ -71,6 +71,8 @@ class Transaction(Base):
     account: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # True = the category is a default guess that the user has not confirmed yet.
     review: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # True = the user said this entry is not the mirror of another one (a transfer).
+    pair_reviewed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
 
 
 class BrokerImport(Base):
@@ -176,6 +178,9 @@ class BankLink(Base):
     valid_until: Mapped[dt.datetime] = mapped_column(DateTime)
     last_sync: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     expiry_notified: Mapped[bool] = mapped_column(Boolean, default=False)
+    # main | secondary | investment | savings
+    role: Mapped[str] = mapped_column(String(20), default="secondary",
+                                      server_default="secondary")
     bank_account_id: Mapped[int | None] = mapped_column(
         ForeignKey("bank_accounts.id"), nullable=True
     )
