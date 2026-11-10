@@ -42,13 +42,42 @@ def investment_platforms() -> tuple[str, ...]:
     return tuple(p for p in (norm(x) for x in settings.investment_banks.split(",")) if p)
 
 
+ROLES = {"main": "⭐ Main", "secondary": "💳 Secondary",
+         "investment": "📈 Investment", "savings": "🐷 Savings"}
+
+
+def initial_role(bank: str, db: Session) -> str:
+    if any(p in norm(bank) for p in investment_platforms()):
+        return "investment"
+    has_main = db.scalar(select(func.count()).select_from(BankLink)
+                         .where(BankLink.role == "main"))
+    return "secondary" if has_main else "main"
+
+
+_PLATFORMS_CACHE: set[str] = set()
+
+
+def platforms(db: Session | None = None) -> set[str]:
+    """Names (normalised) treated as investment platforms: banks with the
+    investment role + the INVESTMENT_BANKS names that are not connected yet."""
+    if db is not None:
+        _PLATFORMS_CACHE.clear()
+        _PLATFORMS_CACHE.update(norm(b) for b in db.scalars(
+            select(BankLink.bank).where(BankLink.role == "investment")).all())
+        other = {norm(b) for b in db.scalars(
+            select(BankLink.bank).where(BankLink.role != "investment")).all()}
+        _PLATFORMS_CACHE.update(p for p in investment_platforms()
+                                if not any(p in o for o in other))
+    return _PLATFORMS_CACHE or set(investment_platforms())
+
+
 def is_platform(bank: str | None) -> bool:
-    return any(p in norm(bank) for p in investment_platforms())
+    return any(p in norm(bank) for p in platforms())
 
 
 def goes_to_investment(text: str, bank: str) -> bool:
     t = norm(text)
-    return any(p in t for p in investment_platforms() if p not in norm(bank))
+    return any(p in t for p in platforms() if p not in norm(bank))
 
 
 def investment_category(existing: list[str]) -> str:
@@ -188,8 +217,13 @@ def text_is_transfer(text: str, bank: str) -> bool:
     if any(c in t for c in TRANSFER_KEYS):
         return True
     owner = norm(settings.report_owner)
-    if owner and owner != "account owner" and owner in t:
-        return True
+    if owner and owner != "account owner":
+        if owner in t:
+            return True
+        # Two words of the name are enough ("JANE DOE" for "Jane Q Doe Smith").
+        words = [w for w in owner.split() if len(w) >= 3]
+        if len(words) >= 2 and sum(matches(w, t) for w in words) >= 2:
+            return True
     return any(b in t for b in OWN_BANKS if b not in norm(bank))
 
 
@@ -348,7 +382,7 @@ def _account_for(db: Session, link: BankLink) -> BankAccount:
 def save_movements(db: Session, link: BankLink, raws: list[dict],
                    own_ibans: set[str], res: SyncResult) -> None:
     """Normalise, deduplicate, classify and insert. Does not commit."""
-    if is_platform(link.bank):
+    if link.role == "investment" or is_platform(link.bank):
         return  # investment platform: only its balance (sync_all sets it)
     rules = user_rules(db)
     expense_only = expense_only_categories(db)
@@ -408,6 +442,7 @@ def sync_all(db: Session, today: date | None = None, client=None,
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     links = db.scalars(select(BankLink)).all()
     ibans = {link.iban.replace(" ", "") for link in links if link.iban}
+    platforms(db)
     for link in links:
         if only and link.bank not in only:
             continue
@@ -452,6 +487,7 @@ def reclassify_pending(db: Session) -> int:
     """Run transfers and rules again over what is pending (e.g. after improving
     the rules or learning a new one). Returns how many stop being pending."""
     reopen_negatives(db)
+    platforms(db)
     rules = user_rules(db)
     expense_only = expense_only_categories(db)
     existing_cats = existing_categories(db)
@@ -519,7 +555,7 @@ def save_session(db: Session, session: dict, bank: str) -> list[BankLink]:
         h = _sha(acc.get("identification_hash") or acc["uid"])
         link = db.scalar(select(BankLink).where(BankLink.identification_hash == h))
         if link is None:
-            link = BankLink(identification_hash=h, bank=bank)
+            link = BankLink(identification_hash=h, bank=bank, role=initial_role(bank, db))
             db.add(link)
         link.bank = bank
         link.session_id = session["session_id"]
@@ -606,3 +642,37 @@ def suggestion(merchant: str | None, description: str | None,
                categories: list[str]) -> str | None:
     """For /pending: the base category (even if it does not exist yet)."""
     return base_category(f"{merchant} {description}", categories)
+
+
+# --- Mirror entries: the same money leaving one account and entering another ---
+PAIR_DAYS = 3
+
+
+def detect_pairs(db: Session, since: date | None = None) -> list[tuple[int, int]]:
+    """(out_id, in_id) with the same amount, in different accounts and <= PAIR_DAYS
+    days apart, that the user has not dismissed yet."""
+    since = since or (date.today() - timedelta(days=45))
+    base = [Transaction.origin == "bank", Transaction.pair_reviewed.is_(False),
+            Transaction.date >= since, Transaction.amount > 0]
+    outs = db.scalars(select(Transaction).where(*base, Transaction.kind == "expense")).all()
+    ins = db.scalars(select(Transaction).where(*base, Transaction.kind == "income")).all()
+    used, pairs = set(), []
+    for o in sorted(outs, key=lambda t: t.date):
+        for i in ins:
+            if (i.id not in used and i.amount == o.amount and i.account != o.account
+                    and abs((i.date - o.date).days) <= PAIR_DAYS):
+                pairs.append((o.id, i.id))
+                used.add(i.id)
+                break
+    return pairs
+
+
+def resolve_pair(db: Session, out_id: int, in_id: int, is_transfer: bool) -> None:
+    for tid in (out_id, in_id):
+        tx = db.get(Transaction, tid)
+        if tx is None:
+            continue
+        if is_transfer:
+            tx.kind, tx.category, tx.review = "transfer", TRANSFER, False
+        tx.pair_reviewed = True
+    db.commit()

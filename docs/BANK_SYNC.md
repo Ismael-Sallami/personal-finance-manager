@@ -108,6 +108,24 @@ not as a transfer. Their own movements (ETF buys, savings plans) are ignored: on
 their cash balance is read. Pending rows from those accounts are retired. Set it
 empty if you do not want this.
 
+### Bank roles
+
+Each connected bank has a role, shown in `/connections` (tap "⚙ bank" to change
+it): main (only one), secondary, investment or savings. A new bank starts as
+investment if its name matches `INVESTMENT_BANKS`, otherwise as main if you have
+none yet, otherwise as secondary. The investment role drives the platform logic
+above (`INVESTMENT_BANKS` stays as the default for names not connected yet).
+Savings: what you move there is a transfer.
+
+### Mirror pairs
+
+If the same amount leaves one account and enters another within 3 days and no
+rule caught it (typically your salary moved to another bank), `/pending` first
+asks "Is this the same money moving between your accounts?". Yes turns both
+into transfers; No marks them reviewed and it is never asked again. The daily
+sync warns you when there is any pair waiting. The account owner (`REPORT_OWNER`)
+is recognised with any two words of the name.
+
 ## 5. Renewing the consent
 
 A consent lasts 90 to 180 days depending on the bank. Ten days before it ends

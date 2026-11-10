@@ -561,3 +561,51 @@ def test_another_command_cancels_the_bank_search(captured):
     bot_banks._WAITING_BANK["country"] = "ES"
     _run(bot.handle_update(_msg("/pace")))
     assert not bot_banks.waiting_for_bank()
+
+
+def test_mirror_pair_salary_moved_to_another_bank(captured):
+    S = sessionmaker(bind=captured["engine"])
+    today = date.today()
+    out = _tx(S, category="Uncategorized", review=True, merchant="TRANSFER", account="imagin",
+              amount=Decimal("850"), day=today)
+    inc = _tx(S, category="Uncategorized", review=True, kind="income", merchant="From X",
+              account="Revolut", amount=Decimal("850"), day=today)
+    _run(bot.handle_update(_msg("/pending")))
+    assert "same money" in _last(captured)[0]
+    _run(bot.handle_update(_cb(_button(captured, "✅ Yes, my own transfer"))))
+    s = S()
+    assert {s.get(Transaction, i).kind for i in (out, inc)} == {"transfer"}
+
+
+def test_dismissed_pair_is_not_asked_again(captured):
+    S = sessionmaker(bind=captured["engine"])
+    _tx(S, category="Groceries", merchant="LIDL", account="imagin", amount=Decimal("20"))
+    _tx(S, category="Bizum received", kind="income", merchant="Bizum", account="Revolut",
+        amount=Decimal("20"))
+    _run(bot.handle_update(_msg("/pending")))
+    _run(bot.handle_update(_cb(_button(captured, "❌ No, they are different"))))
+    from app.services.bank_sync import detect_pairs
+    assert detect_pairs(S()) == []
+
+
+def test_owner_with_two_words_is_a_transfer(monkeypatch):
+    from app.services import bank_sync as bs
+    monkeypatch.setattr(settings, "report_owner", "Ann Maria Smith Jones", raising=False)
+    assert bs.text_is_transfer("From ANN SMITH", "Revolut")
+    assert not bs.text_is_transfer("Ann Belle Ruiz", "Revolut")
+
+
+def test_roles_from_connections(captured, bank_on):
+    S = sessionmaker(bind=captured["engine"])
+    s = S()
+    for b in ("imagin", "Revolut"):
+        s.add(BankLink(bank=b, session_id="s", uid=b, identification_hash=b,
+                       valid_until=datetime(2030, 1, 1), role="secondary"))
+    s.commit()
+    _run(bot.handle_update(_msg("/connections")))
+    _run(bot.handle_update(_cb(_button(captured, "⚙ imagin"))))
+    _run(bot.handle_update(_cb(_button(captured, "⭐ Main"))))
+    assert "imagin → ⭐ Main" in _last(captured)[0]
+    _run(bot.handle_update(_cb("rs:main:Revolut")))
+    roles = {link.bank: link.role for link in S().scalars(select(BankLink))}
+    assert roles == {"imagin": "secondary", "Revolut": "main"}  # only one main
