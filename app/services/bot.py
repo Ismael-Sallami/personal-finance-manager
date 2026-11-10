@@ -102,6 +102,7 @@ COMMANDS = [
     ("savings", "Savings of the period [mm/yyyy]"),
     ("cashflow", "Income vs expenses of the year [yyyy]"),
     ("networth", "Investments + banks"),
+    ("balance", "Balances by kind; set one: name amount (savings, cash...)"),
     ("invested", "Invested capital per platform [name amount]"),
     ("banks", "Balance of each account"),
     ("bank", "Set a balance by hand: name balance"),
@@ -292,6 +293,7 @@ HELP = (
     "/summary [mm/yyyy] — income, expenses, savings, net worth\n"
     "/net [mm/yyyy | yyyy | mm/yyyy mm/yyyy] — income, expenses and net (ranges allowed)\n"
     "/networth — investments and banks\n"
+    "/balance [name amount] — balances by kind; accounts the app cannot read (savings, cash)\n"
     "/invested [platform amount] — invested capital (Trade Republic, MyInvestor...)\n"
     "/banks — balance per account\n"
     "/bank &lt;name&gt; &lt;balance&gt; — update an account\n"
@@ -441,6 +443,10 @@ async def _handle_callback(cb: dict) -> None:
             await send_message(chat_id, HELP)
         return
 
+    if data.startswith("st:"):  # /balance: kind of the new account
+        from app.services import bot_banks as bb
+        await edit_message_text(chat_id, message_id, bb.create_account_kind(data[3:]))
+        return
     if data.startswith(("par:", "rl:", "rs:")):  # mirror pairs and bank roles
         from app.services import bot_banks as bb
         if data.startswith("par:"):
@@ -518,7 +524,7 @@ async def _handle_callback(cb: dict) -> None:
 # --- Bank sync / analysis commands (bot_banks.py) ---
 _BANK_CMDS = {"/pace", "/merchants", "/subscriptions", "/pending", "/budget",
               "/connect", "/connections", "/sync", "/disconnect", "/categories", "/move",
-              "/breakdown", "/invested"}
+              "/breakdown", "/invested", "/balance"}
 # Commands that only make sense with the bank connected (else: "bank sync is off").
 _NEEDS_BANK = {"/connect", "/connections", "/sync", "/disconnect"}
 # menu callback -> command
@@ -560,6 +566,9 @@ async def _banks_cmd(chat_id, cmd: str, arg: str) -> None:
         else:
             text, kb = bb.choose_bank()
             await send_message(chat_id, text, reply_markup=kb)
+    elif cmd == "/balance":
+        text, kb = bb.balance_txt(arg)
+        await send_message(chat_id, text, reply_markup=kb)
     elif cmd == "/invested":
         await send_message(chat_id, bb.invested_txt(arg))
     elif cmd == "/connections":
@@ -643,9 +652,8 @@ def _net_worth_txt() -> str:
         notices = bb.investment_notices(db)
     finally:
         db.close()
-    if caps:  # invested capital per platform (no market valuation)
-        rows = "\n".join(f"   {n}: {money(v)}" for n, v in caps)
-        block = f"📈 <b>Invested</b>: {money(k['inv_value'])}\n{rows}\n"
+    if caps:  # invested capital: same view as /balance, grouped by kind
+        return bb.balance_summary() + ("\n\n" + "\n".join(notices) if notices else "")
     else:
         block = (f"📈 <b>Investments</b>: {money(k['inv_value'])}\n"
                  f"   Invested: {money(k['inv_invested'])}\n"
