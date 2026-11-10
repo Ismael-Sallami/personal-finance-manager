@@ -67,6 +67,8 @@ class Settings(BaseSettings):
     # Money sent to them from your spending accounts is "Investment"; their own
     # movements are ignored (only their cash balance counts).
     investment_banks: str = "trade republic,myinvestor"
+    # Country (ISO 2 letters) used to look up the banks at Enable Banking.
+    bank_country: str = "ES"
     # How entries get in: auto (bank if EB is configured, else manual) | manual | bank
     entry_mode: str = "auto"
 

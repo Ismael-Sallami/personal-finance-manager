@@ -54,6 +54,8 @@ def _clear_query_limit():
     from app.services import bank_sync
     bank_sync._LAST_QUERY.clear()
     bank_sync._PLATFORMS_CACHE.clear()
+    from app.services import bot_banks
+    bot_banks._BETA_CACHE.clear()
     yield
     bank_sync._LAST_QUERY.clear()
     bank_sync._PLATFORMS_CACHE.clear()

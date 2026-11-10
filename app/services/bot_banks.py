@@ -579,6 +579,8 @@ def run_sync(db, force: bool = False, only: list[str] | None = None) -> dict:
                           f"{link.valid_until:%d/%m}. Renew it with <code>/connect {key}</code>")
             link.expiry_notified = True
     db.commit()
+    if today.day == 1:  # once a month, not daily
+        alerts.extend(investment_notices(db))
     from app.services.bank_sync import detect_pairs
     pairs = len(detect_pairs(db))
     if pairs:
@@ -631,6 +633,9 @@ def month_end_summary(db, today: date) -> tuple[str, bytes | None]:
         lines += [f"• {c}: {money(s)}" for c, s, _ in top]
     if pend:
         lines.append(f"\n❓ {pend} left to categorise: /pending")
+    inv = investment_notices(db)
+    if inv:
+        lines.append("\n" + "\n".join(inv))
     img = None
     if cats["labels"]:
         try:
@@ -1192,3 +1197,104 @@ def answer_pair(data: str) -> tuple[str, dict | None]:
                 else "👍 Understood, they are different. I will not ask again.")
     _SESSION["done"] += 1
     return next_pending(previous=previous)
+
+
+# --- Invested capital per platform (/invested) ---
+_BETA_CACHE: dict[str, tuple[date, bool]] = {}
+DAYS_TO_CONFIRM_INVESTMENT = 30
+
+
+def _is_beta(platform: str) -> bool:
+    """Is its Enable Banking connector still beta? (daily cache; if it fails, yes)."""
+    from app.services import enablebanking as eb
+    from app.services.bank_sync import norm
+    today = _today()
+    cached = _BETA_CACHE.get(platform)
+    if cached and cached[0] == today:
+        return cached[1]
+    beta = True
+    try:
+        for a in eb.aspsps(settings.bank_country):
+            if norm(platform) in norm(a["name"]):
+                beta = bool(a.get("beta"))
+                break
+    except Exception as exc:
+        log.info("beta %s: %s", platform, exc)
+    _BETA_CACHE[platform] = (today, beta)
+    return beta
+
+
+def investment_notices(db) -> list[str]:
+    """Ask for the amount of the platforms that cannot be read (beta connector or
+    not connected) if you have not confirmed it for 30 days; say when a
+    connector stops being beta."""
+    from app.services.aggregation import invested_capital
+    from app.services.bank_sync import PLATFORM_NAMES, norm, platforms
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    connected = {norm(b) for b in db.scalars(select(BankLink.bank)).all()}
+    caps = {norm(c.name): c for c in invested_capital(db)}
+    notices = []
+    for p in sorted(platforms()):
+        name = PLATFORM_NAMES.get(p, p.title())
+        cap = caps.get(norm(name))
+        is_connected = any(p in c for c in connected)
+        if not is_connected and settings.bank_sync_enabled and not _is_beta(name):
+            notices.append(f"✨ {name} is no longer in beta: connect it with /connect "
+                           "(and it stops asking you for the amount).")
+            continue
+        old = cap is None or not cap.updated_at or \
+            (now - cap.updated_at).days >= DAYS_TO_CONFIRM_INVESTMENT
+        if not is_connected and old:
+            notices.append(f"📈 How much do you have invested in <b>{name}</b>? "
+                           f"<code>/invested {name} 1234</code>")
+        elif is_connected and cap is None:
+            notices.append(f"📈 How much did you have invested in <b>{name}</b> before connecting "
+                           f"it? <code>/invested {name} 1234</code> (from then on it adds only "
+                           "what you send)")
+    return notices
+
+
+def _parse_amount(raw: str):
+    from decimal import Decimal, InvalidOperation
+    raw = raw.strip()
+    try:
+        return Decimal(raw.replace(".", "").replace(",", ".") if "," in raw else raw)
+    except InvalidOperation:
+        return None
+
+
+def invested_txt(arg: str) -> str:
+    """/invested [platform amount]: show or set the invested capital."""
+    from decimal import Decimal
+    from app.services.aggregation import invested_capital, snapshot_today
+    from app.services.bank_sync import PLATFORM_NAMES, investment_account, norm
+    db = _db()
+    try:
+        parts = (arg or "").rsplit(" ", 1)
+        if len(parts) == 2 and parts[0].strip():
+            amount = _parse_amount(parts[1])
+            if amount is None:
+                return "Usage: <code>/invested MyInvestor 1500</code>"
+            name = parts[0].strip()
+            name = next((v for k, v in PLATFORM_NAMES.items() if k == norm(name)), name)
+            acc = investment_account(db, name)
+            acc.balance = max(Decimal("0"), amount)
+            acc.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            db.commit()
+            snapshot_today(db)
+            header = f"✅ {html.escape(acc.name)}: {money(acc.balance)} invested.\n\n"
+        else:
+            header = ""
+        caps = invested_capital(db)
+        notices = investment_notices(db)
+    finally:
+        db.close()
+    if not caps:
+        body = "📈 No invested capital recorded yet."
+    else:
+        total = sum(c.balance for c in caps)
+        rows = "\n".join(f"• {html.escape(c.name)}: {money(c.balance)}"
+                         + (f"  <i>(confirmed {c.updated_at:%d/%m})</i>" if c.updated_at else "")
+                         for c in caps)
+        body = f"📈 <b>Invested capital</b>\n{rows}\n\n<b>Total: {money(total)}</b>"
+    return header + body + ("\n\n" + "\n".join(notices) if notices else "")
