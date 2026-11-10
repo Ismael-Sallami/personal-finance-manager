@@ -1255,10 +1255,18 @@ def investment_notices(db) -> list[str]:
 
 
 def _parse_amount(raw: str):
+    """"1.500,50", "1,500.50" and "1500.50" all work: the last separator is the
+    decimal one; a lone comma is decimal unless it groups thousands (1,500)."""
+    import re
     from decimal import Decimal, InvalidOperation
-    raw = raw.strip()
+    t = raw.strip().replace("€", "").replace(" ", "")
+    if "," in t and "." in t:
+        dec = "," if t.rfind(",") > t.rfind(".") else "."
+        t = t.replace("." if dec == "," else ",", "").replace(dec, ".")
+    elif "," in t:
+        t = t.replace(",", "") if re.fullmatch(r"\d{1,3}(,\d{3})+", t) else t.replace(",", ".")
     try:
-        return Decimal(raw.replace(".", "").replace(",", ".") if "," in raw else raw)
+        return Decimal(t)
     except InvalidOperation:
         return None
 
@@ -1298,3 +1306,88 @@ def invested_txt(arg: str) -> str:
                          for c in caps)
         body = f"📈 <b>Invested capital</b>\n{rows}\n\n<b>Total: {money(total)}</b>"
     return header + body + ("\n\n" + "\n".join(notices) if notices else "")
+
+
+# --- /balance: accounts the app cannot read by itself (interest, cash, investing...) ---
+ACCOUNT_KINDS = {"account": "🏦 Account", "savings": "🐷 Savings / interest",
+                 "investment": "📈 Invested", "cash": "💶 Cash"}
+_NEW_ACCOUNT: dict[str, tuple[str, object]] = {}  # "x" -> (name, amount) waiting for its kind
+
+
+def balance_txt(arg: str) -> tuple[str, dict | None]:
+    """/balance -> every account by kind. /balance <name> <amount> -> set the
+    balance (if the account is new, it asks which kind it is)."""
+    from app.models import BankAccount
+    from app.services.bot import _kb
+    parts = (arg or "").rsplit(" ", 1)
+    if len(parts) == 2 and parts[0].strip() and _parse_amount(parts[1]) is not None:
+        name, amount = parts[0].strip(), _parse_amount(parts[1])
+        db = _db()
+        try:
+            acc = db.scalar(select(BankAccount).where(func.lower(BankAccount.name) == name.lower()))
+            if acc is None:
+                _NEW_ACCOUNT["x"] = (name, amount)
+                rows = [[(t, f"st:{k}")] for k, t in ACCOUNT_KINDS.items()]
+                return (f"🆕 <b>{html.escape(name)}</b> · {money(amount)}\nWhat kind of account is it?",
+                        _kb(rows))
+            synced = db.scalar(select(func.count()).select_from(BankLink)
+                               .where(BankLink.bank_account_id == acc.id))
+            acc.balance = amount
+            acc.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            db.commit()
+            from app.services.aggregation import snapshot_today
+            snapshot_today(db)
+            warning = ("\n<i>Note: this account is synced with the bank and will be "
+                       "overwritten.</i>" if synced else "")
+            return f"✅ {html.escape(acc.name)}: {money(amount)}{warning}\n\n" + balance_summary(), None
+        finally:
+            db.close()
+    if (arg or "").strip():
+        return "Usage: <code>/balance Revolut Savings 1500</code>", None
+    return balance_summary() + ("\n\nTo add or update: <code>/balance name amount</code>\n"
+                                "E.g. <code>/balance Revolut Savings 1500</code>"), None
+
+
+def create_account_kind(kind: str) -> str:
+    from app.models import BankAccount
+    pending = _NEW_ACCOUNT.pop("x", None)
+    if not pending or kind not in ACCOUNT_KINDS:
+        return "⚠ Expired. Type <code>/balance name amount</code> again."
+    name, amount = pending
+    db = _db()
+    try:
+        db.add(BankAccount(name=name, kind=kind, balance=amount,
+                           updated_at=datetime.now(timezone.utc).replace(tzinfo=None)))
+        db.commit()
+        from app.services.aggregation import snapshot_today
+        snapshot_today(db)
+    finally:
+        db.close()
+    return (f"✅ Created {ACCOUNT_KINDS[kind]} <b>{html.escape(name)}</b>: {money(amount)}\n\n"
+            + balance_summary())
+
+
+def balance_summary() -> str:
+    """Every account grouped by kind, with its total and the net worth."""
+    from app.models import BankAccount
+    db = _db()
+    try:
+        accounts = db.scalars(select(BankAccount).order_by(BankAccount.balance.desc())).all()
+        linked = set(db.scalars(select(BankLink.bank_account_id)).all())
+        data = [(a.kind if a.kind in ACCOUNT_KINDS else "account", a.name, a.balance,
+                 a.id in linked) for a in accounts]
+    finally:
+        db.close()
+    if not data:
+        return "🏦 No accounts yet. <code>/balance name amount</code>"
+    lines, total = ["💼 <b>Your balances</b>"], 0
+    for kind, title in ACCOUNT_KINDS.items():
+        group = [(n, s, e) for k, n, s, e in data if k == kind]
+        if not group:
+            continue
+        sub = sum(s for _, s, _ in group)
+        total += sub
+        lines.append(f"\n{title}: <b>{money(sub)}</b>")
+        lines += [f"   {html.escape(n)}: {money(s)}" + (" 🔄" if e else "") for n, s, e in group]
+    lines.append(f"\n<b>Net worth: {money(total)}</b>\n<i>🔄 = updated by the bank on its own</i>")
+    return "\n".join(lines)

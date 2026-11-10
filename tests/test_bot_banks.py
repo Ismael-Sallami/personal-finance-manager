@@ -657,3 +657,22 @@ def test_invested_command_and_beta_notice(captured, monkeypatch):
     bot_banks._BETA_CACHE.clear()
     _run(bot.handle_update(_msg("/banks")))
     assert "MyInvestor is no longer in beta" in captured["msgs"][-1][1]
+
+
+def test_balance_new_savings_account_and_net_worth(captured):
+    from app.models import BankAccount
+    S = sessionmaker(bind=captured["engine"])
+    s = S()
+    s.add(BankAccount(name="imagin", kind="account", balance=Decimal("800")))
+    s.add(BankAccount(name="Broker", kind="investment", balance=Decimal("2000")))
+    s.commit()
+    _run(bot.handle_update(_msg("/balance Revolut Savings 1,500.00")))
+    assert "What kind of account is it?" in _last(captured)[0]
+    _run(bot.handle_update(_cb(_button(captured, "🐷 Savings / interest"))))
+    text = _last(captured)[0]
+    assert "Revolut Savings" in text and "Net worth: 4,300.00" in text
+    _run(bot.handle_update(_msg("/balance Revolut Savings 1600")))
+    assert "Net worth: 4,400.00" in _last(captured)[0]
+    _run(bot.handle_update(_msg("/networth")))
+    p = captured["msgs"][-1][1]
+    assert "🐷 Savings / interest" in p and "📈 Invested" in p and "4,400.00" in p
