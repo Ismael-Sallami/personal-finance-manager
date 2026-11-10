@@ -755,3 +755,246 @@ def negatives_notice(year: int, month: int | None) -> str:
         return ""
     names = ", ".join(f"{html.escape(c)} ({money(v)})" for c, v in neg)
     return f"\n\n⚠ Negative: {names}. Reassign them in /pending."
+
+
+# --- /move: fix a wrongly classified entry ---
+# token -> ("list", ids, filter, page) | ("cat", tx_id, cats)
+_MOVE: "OrderedDict[str, tuple]" = OrderedDict()
+_PER_PAGE = 8
+
+
+def _move_token(value: tuple) -> str:
+    token = secrets.token_urlsafe(6)
+    _MOVE[token] = value
+    while len(_MOVE) > 50:
+        _MOVE.popitem(last=False)
+    return token
+
+
+def move_list(text_filter: str = "", page: int = 0, previous: str = "") -> tuple[str, dict | None]:
+    """Latest classified entries (optionally filtered) as buttons."""
+    from app.services.bot import _kb
+    db = _db()
+    try:
+        q = select(Transaction).where(Transaction.review.is_(False),
+                                      Transaction.category != UNCATEGORIZED)
+        f = (text_filter or "").strip()
+        if f:
+            like = f"%{f.lower()}%"
+            q = q.where(func.lower(Transaction.merchant).like(like)
+                        | func.lower(Transaction.category).like(like))
+        txs = db.scalars(q.order_by(Transaction.date.desc(), Transaction.id.desc())
+                         .offset(page * _PER_PAGE).limit(_PER_PAGE + 1)).all()
+        has_more = len(txs) > _PER_PAGE
+        txs = txs[:_PER_PAGE]
+        info = [(t.id, t.date, t.merchant or t.note or t.category, t.amount, t.kind,
+                 t.category) for t in txs]
+    finally:
+        db.close()
+    head = f"{previous}\n\n" if previous else ""
+    if not info:
+        return head + ("✏️ No entries found" + (f" with “{html.escape(f)}”." if f else ".")), None
+    token = _move_token(("list", [i for i, *_ in info], f, page))
+    rows = []
+    for n, (_, day, name, amount, kind, cat) in enumerate(info):
+        sign = "+" if kind == "income" else ("⇄" if kind == "transfer" else "−")
+        label = f"{day:%d/%m} {name[:18]} {sign}{abs(amount):.2f} → {_icon(cat)}{cat[:12]}"
+        rows.append([(label, f"mv:{token}:{n}")])
+    nav = []
+    if page:
+        nav.append(("◀ Newer", f"mv:{token}:prev"))
+    if has_more:
+        nav.append(("Older ▶", f"mv:{token}:next"))
+    if nav:
+        rows.append(nav)
+    title = "✏️ <b>Which one do you want to move?</b>" + (f" · “{html.escape(f)}”" if f else "")
+    return head + title + "\nTap it and pick the right category.", _kb(rows)
+
+
+def move_choose(tx_id: int) -> tuple[str, dict | None]:
+    from app.services.bot import _kb
+    db = _db()
+    try:
+        tx = db.get(Transaction, tx_id)
+        if tx is None:
+            return "⚠ That entry no longer exists.", None
+        incoming = tx.kind == "income" or (tx.kind == "expense" and tx.amount < 0)
+        cats = (_categories(db, "expense") + _categories(db, "income") if incoming
+                else _categories(db, "expense"))
+        cats = list(dict.fromkeys(cats))
+        text = (f"✏️ <b>{html.escape(tx.merchant or tx.note or '')}</b> "
+                f"{money(abs(tx.amount))} · {tx.date:%d/%m}\n"
+                f"Now: {_icon(tx.category)} <b>{html.escape(tx.category)}</b>\n\n"
+                "Where do I move it?")
+    finally:
+        db.close()
+    token = _move_token(("cat", tx_id, cats))
+    rows = _keyboard(token, cats)
+    rows = [[(t, d.replace("p:", "mc:", 1)) for t, d in row] for row in rows]
+    rows.append([("🔄 My own transfer", f"mc:{token}:t"), ("❓ To pending", f"mc:{token}:p")])
+    return text, _kb(rows)
+
+
+def move_apply(tx_id: int, choice: str, cats: list[str]) -> str:
+    """Move the entry and update its merchant's rule. Returns the text."""
+    from app.models import CategoryRule
+    from app.services.bank_sync import (NoHeadroom, assign_category, mark_transfer,
+                                        pattern_of, reopen_negatives)
+    db = _db()
+    try:
+        tx = db.get(Transaction, tx_id)
+        if tx is None:
+            return "⚠ That entry no longer exists."
+        name = html.escape(tx.merchant or tx.note or "")
+        incoming = tx.kind == "income" or (tx.kind == "expense" and tx.amount < 0)
+        if choice == "t":
+            mark_transfer(db, tx)
+            return f"🔄 {name}: now a transfer between your accounts."
+        if choice == "p":
+            if incoming:
+                tx.kind, tx.amount = "income", abs(tx.amount)
+            elif tx.kind == "transfer":
+                tx.kind = "expense"
+            tx.category, tx.review = UNCATEGORIZED, True
+            db.commit()
+            return f"❓ {name} goes back to /pending."
+        try:
+            cat = cats[int(choice)]
+        except (ValueError, IndexError):
+            return "⚠ Invalid button."
+        is_income = cat in _categories(db, "income") or cat in _INCOME
+        if is_income:
+            tx.kind, tx.amount, tx.category, tx.review = "income", abs(tx.amount), cat, False
+        elif incoming:
+            tx.kind, tx.amount = "income", abs(tx.amount)
+            try:
+                assign_category(tx, cat, set(), refund=True, db=db, strict=True)
+            except NoHeadroom as e:
+                db.rollback()
+                return _headroom_notice(e)
+        else:
+            tx.kind, tx.amount, tx.category, tx.review = "expense", abs(tx.amount), cat, False
+        pattern = pattern_of(tx.merchant, tx.note)
+        rule_txt = ""
+        if pattern:
+            r = db.scalar(select(CategoryRule).where(CategoryRule.pattern == pattern))
+            if r:
+                r.category = cat
+            else:
+                db.add(CategoryRule(pattern=pattern, category=cat))
+            rule_txt = f"\n<i>Next ones from “{pattern}” will go to {html.escape(cat)}.</i>"
+        db.commit()
+        reopened = reopen_negatives(db)
+        extra = (f"\n⚠ {len(reopened)} refund(s) were left negative: back to /pending."
+                 if reopened else "")
+        return f"✅ {name} → {_icon(cat)} <b>{html.escape(cat)}</b>{rule_txt}{extra}"
+    finally:
+        db.close()
+
+
+def move_callback(data: str) -> tuple[str, dict | None]:
+    prefix, token, choice = (data.split(":", 2) + ["", ""])[:3]
+    value = _MOVE.get(token)
+    if not value:
+        return "⚠ Expired. Use /move again.", None
+    if prefix == "mv":
+        _, ids, text_filter, page = value
+        if choice in ("next", "prev"):
+            return move_list(text_filter, page + (1 if choice == "next" else -1))
+        try:
+            return move_choose(ids[int(choice)])
+        except (ValueError, IndexError):
+            return "⚠ Invalid button.", None
+    _, tx_id, cats = _MOVE.pop(token)
+    return move_list(previous=move_apply(tx_id, choice, cats))
+
+
+# --- /breakdown: the entries one by one ---
+_BREAKDOWN: "OrderedDict[str, tuple]" = OrderedDict()  # token -> (year, month, [cats])
+_MAX_MSG = 3800  # Telegram cuts at 4096
+
+
+def _period_cond(year: int, month: int | None):
+    cond = [Transaction.year == year, Transaction.kind.in_(("expense", "income"))]
+    if month:
+        cond.append(Transaction.month == month)
+    return cond
+
+
+def breakdown_menu(year: int, month: int | None) -> tuple[str, dict | None]:
+    from app.services.bot import _kb
+    db = _db()
+    try:
+        rows = db.execute(select(Transaction.category, Transaction.kind,
+                                 func.sum(Transaction.amount), func.count())
+                          .where(*_period_cond(year, month))
+                          .group_by(Transaction.category, Transaction.kind)
+                          .order_by(Transaction.kind, func.sum(Transaction.amount).desc())).all()
+    finally:
+        db.close()
+    period = f"{MONTHS[month]} {year}" if month else str(year)
+    if not rows:
+        return f"📋 No entries in {period}.", None
+    cats = [c for c, *_ in rows]
+    token = secrets.token_urlsafe(6)
+    _BREAKDOWN[token] = (year, month, cats)
+    while len(_BREAKDOWN) > 30:
+        _BREAKDOWN.popitem(last=False)
+    buttons = [(f"{'💶' if k == 'income' else _icon(c)} {c} · {money(v)} ({n})",
+                f"dg:{token}:{i}") for i, (c, k, v, n) in enumerate(rows)]
+    keyboard = [[b] for b in buttons] + [[("📋 Whole period", f"dg:{token}:all")]]
+    return (f"📋 <b>Breakdown · {period}</b>\nPick a category to see its entries.",
+            _kb(keyboard))
+
+
+def breakdown_txt(year: int, month: int | None, category: str | None = None) -> list[str]:
+    """Entries one by one (date, merchant, amount), in chunks for Telegram."""
+    from app.services.bank_sync import norm
+    db = _db()
+    try:
+        q = select(Transaction).where(*_period_cond(year, month))
+        txs = db.scalars(q.order_by(Transaction.date, Transaction.id)).all()
+        if category:
+            c = norm(category)
+            txs = [t for t in txs if c in norm(t.category) or c in norm(t.merchant)]
+        data = [(t.date, t.merchant or t.note or t.category, t.amount, t.kind, t.category,
+                 t.account, t.origin) for t in txs]
+    finally:
+        db.close()
+    period = f"{MONTHS[month]} {year}" if month else str(year)
+    title = f"📋 <b>{html.escape(category) if category else 'Everything'} · {period}</b>"
+    if not data:
+        return [title + "\nNo entries."]
+    spent = sum(a for _, _, a, k, *_ in data if k == "expense")
+    earned = sum(a for _, _, a, k, *_ in data if k == "income")
+    lines = []
+    for day, name, amount, kind, cat, account, origin in data:
+        sign = "+" if kind == "income" else ("↩" if amount < 0 else "−")
+        where = f" · {html.escape(account)}" if account else (" · manual" if origin == "manual" else "")
+        icon = "" if category else f"{_icon(cat)} "
+        lines.append(f"<code>{day:%d/%m}</code> {icon}{html.escape(name[:30])}  "
+                     f"<b>{sign}{money(abs(amount))}</b>{where}")
+    foot = (f"\n<b>{len(data)} entries</b> · expenses {money(spent)}"
+            + (f" · income {money(earned)}" if earned else ""))
+    chunks, current = [], title
+    for ln in lines:
+        if len(current) + len(ln) + 1 > _MAX_MSG:
+            chunks.append(current)
+            current = ""
+        current += "\n" + ln
+    chunks.append(current + "\n" + foot)
+    return chunks
+
+
+def breakdown_callback(data: str) -> list[str]:
+    _, token, choice = (data.split(":", 2) + ["", ""])[:3]
+    value = _BREAKDOWN.get(token)
+    if not value:
+        return ["⚠ Expired. Use /breakdown again."]
+    year, month, cats = value
+    if choice == "all":
+        return breakdown_txt(year, month)
+    try:
+        return breakdown_txt(year, month, cats[int(choice)])
+    except (ValueError, IndexError):
+        return ["⚠ Invalid button."]

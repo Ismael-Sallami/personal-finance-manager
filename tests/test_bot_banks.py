@@ -478,3 +478,56 @@ def test_every_category_has_an_icon():
     for cat, icon in cases.items():
         assert bot_banks._icon(cat) == icon, cat
     assert all(bot_banks._icon(c) != "•" for c in ("Xyz", "Bizums", "Education"))
+
+
+def test_move_changes_category_and_rule(captured):
+    S = sessionmaker(bind=captured["engine"])
+    _tx(S, category="Gym", merchant="SYNERGYM")
+    t = _tx(S, category="Clothes", merchant="DECATHLON NEVADA", amount=Decimal("13.99"))
+    _run(bot.handle_update(_msg("/move decathlon")))
+    text, kb = _last(captured)
+    assert "Which one do you want to move?" in text
+    _run(bot.handle_update(_cb(kb["inline_keyboard"][0][0]["callback_data"])))
+    assert "Now: " in _last(captured)[0]
+    _run(bot.handle_update(_cb(_button(captured, "💪 Gym"))))
+    final = _last(captured)[0]
+    assert "→ 💪 <b>Gym</b>" in final and "“decathlon”" in final
+    s = S()
+    assert s.get(Transaction, t).category == "Gym"
+    assert s.scalar(select(CategoryRule).where(CategoryRule.pattern == "decathlon")).category == "Gym"
+    assert len(captured["msgs"]) == 1  # everything in the same card
+
+
+def test_move_to_pending(captured):
+    S = sessionmaker(bind=captured["engine"])
+    a = _tx(S, category="Groceries", merchant="AAA")
+    _run(bot.handle_update(_msg("/move")))
+    _run(bot.handle_update(_cb(_last(captured)[1]["inline_keyboard"][0][0]["callback_data"])))
+    _run(bot.handle_update(_cb(_button(captured, "❓ To pending"))))
+    assert S().get(Transaction, a).review is True
+
+
+def test_breakdown_menu_and_list(captured):
+    S = sessionmaker(bind=captured["engine"])
+    _tx(S, category="Groceries", merchant="MERCADONA", amount=Decimal("12.50"))
+    _tx(S, category="Groceries", merchant="LIDL", amount=Decimal("7"))
+    _tx(S, category="Salary", kind="income", merchant="ACME", amount=Decimal("1000"))
+    _run(bot.handle_update(_msg("/breakdown")))
+    _, kb = _last(captured)
+    labels = [b["text"] for f in kb["inline_keyboard"] for b in f]
+    assert any(t.startswith("🛒 Groceries · ") and t.endswith("(2)") for t in labels)
+    _run(bot.handle_update(_cb(_button(captured, next(t for t in labels if "Groceries" in t)))))
+    listing = _last(captured)[0]
+    assert "MERCADONA" in listing and "LIDL" in listing and "ACME" not in listing
+    _run(bot.handle_update(_msg("/breakdown mercadona")))
+    assert "MERCADONA" in captured["msgs"][-1][1] and "LIDL" not in captured["msgs"][-1][1]
+
+
+def test_long_breakdown_is_split_in_chunks(captured):
+    S = sessionmaker(bind=captured["engine"])
+    for i in range(150):
+        _tx(S, category="Groceries", merchant=f"SHOP NUMBER {i:03d}")
+    today = date.today()
+    chunks = bot_banks.breakdown_txt(today.year, today.month)
+    assert len(chunks) > 1 and all(len(c) <= 4096 for c in chunks)
+    assert "150 entries" in chunks[-1]
