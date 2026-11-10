@@ -64,13 +64,14 @@ def menu_kb(pending: int = 0, bank_mode: bool | None = None) -> dict:
     pend = f"🏷 Pending ({pending})" if pending else "🏷 Pending"
     rows = [
         [("📊 Summary", "m:summary"), ("⏱ Pace", "m:pace"), ("📐 Net", "m:net")],
-        [("🧾 Categories", "m:cats"), ("🏪 Merchants", "m:merchants")],
+        [("🧾 Expenses", "m:cats"), ("💶 Income", "m:income"), ("📋 Breakdown", "m:breakdown")],
+        [("🏪 Merchants", "m:merchants"), ("🗂 Categories", "m:categories")],
         [("🔁 Subscriptions", "m:subs"), ("🎯 Budgets", "m:budget")],
         [("💼 Net worth", "m:networth"), ("🏦 Balances", "m:banks"), ("📈 Cashflow", "m:cashflow")],
     ]
     if bank_mode:
         rows += [
-            [(pend, "m:pending"), ("🔄 Sync", "m:sync")],
+            [(pend, "m:pending"), ("✏️ Move", "m:move"), ("🔄 Sync", "m:sync")],
             [("🔗 Connections", "m:connections"), ("➕ Connect bank", "m:connect")],
         ]
     rows += [
@@ -89,10 +90,13 @@ COMMANDS = [
     ("summary", "Income, expenses, savings and pace of the month [mm/yyyy]"),
     ("pace", "Spent so far, projection and comparison with last month"),
     ("expenses", "Expenses by category [mm/yyyy]"),
+    ("income", "Income by category [mm/yyyy]"),
     ("merchants", "Where the money goes [mm/yyyy]"),
     ("subscriptions", "Detected monthly charges and their yearly cost"),
     ("pending", "Categorise new movements (it learns)"),
     ("categories", "Your categories and the ones created on their own"),
+    ("move", "Fix the category of an entry [text]"),
+    ("breakdown", "Entries one by one [mm/yyyy] [category]"),
     ("budget", "See budgets or set one: Category amount"),
     ("net", "Income - expenses [mm/yyyy | yyyy | range]"),
     ("savings", "Savings of the period [mm/yyyy]"),
@@ -290,6 +294,7 @@ HELP = (
     "/banks — balance per account\n"
     "/bank &lt;name&gt; &lt;balance&gt; — update an account\n"
     "/expenses [mm/yyyy] — expenses by category\n"
+    "/income [mm/yyyy] — income by category\n"
     "/cashflow [yyyy] — income vs expenses of the year\n"
     "/savings [mm/yyyy] — savings of the period\n"
     "/report [mm/yyyy | yyyy | mm/yyyy mm/yyyy] — PDF with charts (ranges allowed)\n"
@@ -300,6 +305,8 @@ HELP = (
     "/subscriptions — detected monthly charges\n"
     "/pending — categorise new movements (it learns)\n"
     "/categories — your categories and the base ones\n"
+    "/move [text] — fix a wrongly classified entry\n"
+    "/breakdown [mm/yyyy] [category] — entries one by one\n"
     "/budget [category amount] — see or set budgets\n\n"
     "<b>Bank sync</b> (bank mode only, see docs/BANK_SYNC.md)\n"
     "/sync — fetch the movements now\n"
@@ -357,6 +364,9 @@ async def handle_update(update: dict) -> None:
         await send_message(chat_id, _bank_set(arg))
     elif cmd == "/expenses":
         await send_message(chat_id, _expenses_txt(*_parse_period(arg)))
+    elif cmd == "/income":
+        from app.services import bot_banks as bb
+        await send_message(chat_id, bb.income_txt(*_parse_period(arg)))
     elif cmd == "/cashflow":
         year, _ = _parse_period(arg)
         await send_message(chat_id, _cashflow_txt(year))
@@ -404,6 +414,9 @@ async def _handle_callback(cb: dict) -> None:
             await send_message(chat_id, _banks_txt())
         elif action == "cats":
             await send_message(chat_id, _expenses_txt(*_parse_period("")))
+        elif action == "income":
+            from app.services import bot_banks as bb
+            await send_message(chat_id, bb.income_txt(*_parse_period("")))
         elif action == "cashflow":
             await send_message(chat_id, _cashflow_txt(date.today().year))
         elif action == "net":
@@ -418,6 +431,18 @@ async def _handle_callback(cb: dict) -> None:
             await send_message(chat_id, HELP)
         return
 
+    if data.startswith("dg:"):  # /breakdown: first part in the card, the rest apart
+        from app.services import bot_banks as bb
+        chunks = bb.breakdown_callback(data)
+        await edit_message_text(chat_id, message_id, chunks[0])
+        for chunk in chunks[1:]:
+            await send_message(chat_id, chunk)
+        return
+    if data.startswith(("mv:", "mc:")):  # /move
+        from app.services import bot_banks as bb
+        text_, kb = bb.move_callback(data)
+        await edit_message_text(chat_id, message_id, text_, reply_markup=kb)
+        return
     if data == "dn":
         await edit_message_text(chat_id, message_id, "Cancelled, nothing was disconnected.")
         return
@@ -439,10 +464,9 @@ async def _handle_callback(cb: dict) -> None:
     if data.startswith("p:"):
         from app.services import bot_banks as bb
         text_, kb, go_on = bb.answer_pending(data)
+        if go_on:  # same card: confirmation on top + next entry
+            text_, kb = bb.next_pending(previous=text_)
         await edit_message_text(chat_id, message_id, text_, reply_markup=kb)
-        if go_on:  # "✏️ Other" waits for the name; "↩" asks for the expense category
-            text_, kb = bb.next_pending()
-            await send_message(chat_id, text_, reply_markup=kb)
         return
 
     if data.startswith("c:ok:"):
@@ -462,13 +486,15 @@ async def _handle_callback(cb: dict) -> None:
 
 # --- Bank sync / analysis commands (bot_banks.py) ---
 _BANK_CMDS = {"/pace", "/merchants", "/subscriptions", "/pending", "/budget",
-              "/connect", "/connections", "/sync", "/disconnect", "/categories"}
+              "/connect", "/connections", "/sync", "/disconnect", "/categories", "/move",
+              "/breakdown"}
 # Commands that only make sense with the bank connected (else: "bank sync is off").
 _NEEDS_BANK = {"/connect", "/connections", "/sync", "/disconnect"}
 # menu callback -> command
 _MENU_BANK = {"/pace": "/pace", "/merchants": "/merchants", "/subs": "/subscriptions",
               "/pending": "/pending", "/budget": "/budget", "/sync": "/sync",
-              "/connections": "/connections", "/connect": "/connect"}
+              "/connections": "/connections", "/connect": "/connect",
+              "/move": "/move", "/breakdown": "/breakdown", "/categories": "/categories"}
 
 
 async def _banks_cmd(chat_id, cmd: str, arg: str) -> None:
@@ -487,6 +513,8 @@ async def _banks_cmd(chat_id, cmd: str, arg: str) -> None:
     elif cmd == "/pending":
         bb._SKIPPED.clear()
         bb._WAITING.clear()
+        bb._SESSION["done"] = 0
+        bb.reopen_negatives_bot()
         text, kb = bb.next_pending()
         await send_message(chat_id, text, reply_markup=kb)
     elif cmd == "/budget":
@@ -499,6 +527,21 @@ async def _banks_cmd(chat_id, cmd: str, arg: str) -> None:
             await send_message(chat_id, text, reply_markup=kb)
     elif cmd == "/connections":
         await send_message(chat_id, bb.connections_txt())
+    elif cmd == "/breakdown":
+        # /breakdown [mm/yyyy | yyyy] [category or merchant]
+        toks = arg.split()
+        period = toks[0] if toks and toks[0][:1].isdigit() else ""
+        rest = " ".join(toks[1:] if period else toks)
+        y, m = _parse_period(period)
+        if rest:
+            for chunk in bb.breakdown_txt(y, m, rest):
+                await send_message(chat_id, chunk)
+        else:
+            text, kb = bb.breakdown_menu(y, m)
+            await send_message(chat_id, text, reply_markup=kb)
+    elif cmd == "/move":
+        text, kb = bb.move_list(arg)
+        await send_message(chat_id, text, reply_markup=kb)
     elif cmd == "/categories":
         await send_message(chat_id, bb.categories_txt())
     elif cmd == "/disconnect":
@@ -621,10 +664,13 @@ def _expenses_txt(year: int, month: int | None) -> str:
     period = f"{MONTHS[month]} {year}" if month else str(year)
     if not cats["labels"]:
         return f"🧾 No expenses in {period}."
+    from app.services import bot_banks as bb
     rows = "\n".join(
-        f"• {lbl}: {money(val)}" for lbl, val in zip(cats["labels"], cats["data"])
+        f"{bb._icon(lbl)} {lbl}: {money(val)}" for lbl, val in zip(cats["labels"], cats["data"])
     )
-    return f"🧾 <b>Expenses by category · {period}</b>\n{rows}"
+    total = sum(cats["data"])
+    return (f"🧾 <b>Expenses by category · {period}</b>\n{rows}\n\n<b>Total: {money(total)}</b>"
+            + bb.negatives_notice(year, month))
 
 
 def _cashflow_txt(year: int) -> str:
