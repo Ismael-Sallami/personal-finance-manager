@@ -23,6 +23,45 @@ missing feature.
 
 ---
 
+## Two ways to use it
+
+You choose how entries get in. Everything else (reports, net worth, the bot's
+summaries) works the same in both.
+
+| | **Manual mode** (default) | **Bank mode** |
+|---|---|---|
+| Turned on by | leaving `EB_APP_ID` / `EB_PRIVATE_KEY` empty | setting both (`ENTRY_MODE=auto`) |
+| How entries arrive | you keep notes on your phone and paste them to the bot (or to the web import) at the end of the month | a daily **read-only PSD2** sync pulls movements and balances from your banks |
+| What you do | write `Groceries: 15-1+3` lines | categorise the few new merchants with buttons; the app learns |
+| Cash | typed like any entry | still typed by hand |
+| Cost | none | a free Enable Banking account in restricted mode |
+
+Both can run at once: bank movements and hand-typed entries live in the same
+table, and `ENTRY_MODE=manual` forces the bank features off even if the
+credentials are present. Bank mode setup is in
+[`docs/BANK_SYNC.md`](docs/BANK_SYNC.md). Bank commands answer "bank sync is
+off" while it is not configured.
+
+---
+
+## Demo
+
+Bank mode in the Telegram bot.
+
+**`/pace`: where the month is heading**
+
+![/pace](docs/media/bot-pace.gif)
+
+**`/pending`: categorise a new merchant once, the app remembers**
+
+![/pending](docs/media/bot-pending.gif)
+
+**Automatic month-end close with a chart**
+
+![Month close](docs/media/bot-month-close.gif)
+
+---
+
 ## Full project report
 
 A 51-page report walks through the whole project: the design decisions and why
@@ -70,6 +109,20 @@ cd informe && make        # rebuild it (needs a LaTeX distribution)
 - Excel: monthly and yearly.
 - PDF with embedded charts: monthly, yearly, any range of months, and a net
   worth report.
+
+**Bank mode** (optional, [`docs/BANK_SYNC.md`](docs/BANK_SYNC.md))
+- Daily read-only sync of movements and balances through Enable Banking (PSD2,
+  Account Information only). No payments, nothing stored at the aggregator.
+- Automatic categories: a table of base categories plus rules the app learns
+  when you answer `/pending`. Bizum is never auto-classified.
+- Transfers between your own accounts are detected and excluded from every sum.
+- Refunds (money coming in under an expense category) subtract from that
+  expense instead of inflating income.
+- Month pace and projection, comparison with last month, top merchants,
+  subscription detection with price-rise alerts, unusual-charge alerts and
+  monthly budgets with 80 % / 100 % warnings.
+- Warning before each bank consent expires, and an automatic month-end close
+  with a chart.
 
 **Telegram bot**
 - Log entries from a chat, with a Confirm/Cancel preview before anything is
@@ -148,6 +201,10 @@ Everything lives in `.env`. Nothing here is baked into the code.
 | `PUBLIC_BASE_URL` | Public URL used to register the webhook. | empty |
 | `USE_SCHEDULER` | `true` only on always-on hosts. | `false` |
 | `TASKS_TOKEN` | Authorises `/tasks/*`. Empty disables those endpoints. | empty |
+| `ENTRY_MODE` | `auto` (bank if `EB_*` are set), `manual` or `bank`. | `auto` |
+| `EB_APP_ID` | Enable Banking application id (bank mode). | empty |
+| `EB_PRIVATE_KEY` | Content of the application's `.pem` (bank mode). | empty |
+| `BANK_SYNC_FROM` | Do not import movements before this date (`yyyy-mm-dd`). | start of the month |
 
 ---
 
@@ -207,7 +264,8 @@ Recommended cron jobs:
 | `POST /tasks/snapshot` | daily, 23:00 |
 | `POST /tasks/backup` | weekly |
 | `POST /tasks/contributions` | 1st of the month, 06:00 |
-| `POST /tasks/reminder` | last day of the month, 20:00 |
+| `POST /tasks/reminder` | days 28 to 31, 20:00 (it only sends on the last day; `?force=1` sends anyway) |
+| `POST /tasks/banksync` | daily, 08:00 (bank mode only) |
 
 The token goes in the `X-Tasks-Token` header or as `?token=`. **On cron-job.org
 use `?token=`**: custom headers are not forwarded and the endpoint answers 403
@@ -253,6 +311,16 @@ Create a bot with [@BotFather](https://t.me/botfather), put the token in
 | `/savings [mm/yyyy]` | Savings of the period |
 | `/report [period]` | PDF with charts |
 | `/detailed [period]` | Full PDF: net worth, categories, cashflow |
+| `/pace` | Spent so far, projection and comparison with last month |
+| `/merchants [mm/yyyy]` | Where the money goes |
+| `/subscriptions` | Detected monthly charges and yearly cost |
+| `/pending` | Categorise new movements with buttons (it learns) |
+| `/budget [category amount]` | Show budgets or set one (`0` removes it) |
+| `/categories` | Your categories and the base ones created on their own |
+| `/sync`, `/connections` | Bank mode: fetch now, connected banks and days left |
+| `/connect`, `/disconnect` | Bank mode: connect, renew or revoke a bank |
+
+Typing `/` shows the list (the bot registers its commands with Telegram on boot).
 
 Any other text is read as expense lines and previewed before saving.
 
@@ -298,17 +366,18 @@ app/
   main.py       config.py  db.py  models.py  auth.py  security.py  templating.py
   format.py     scheduler.py
   routers/      dashboard, expenses, investments, banks, reports, tasks,
-                telegram, auth_routes
+                telegram, auth_routes, bank_sync
   services/
     parsers/    myinvestor, traderepublic, kraken, dispatch
     reports/    excel.py  pdf.py  charts.py  generate.py
     aggregation.py  pnl.py  prices.py  symbol_lookup.py  contributions.py
     backup.py   bot.py     expenses_parse.py
+    bank_sync.py  enablebanking.py  insights.py  bot_banks.py
   templates/    static/
 migrations/     Alembic
 scripts/        seed.py  backup.py
 tests/
-docs/           ARCHITECTURE.md  DEPLOYMENT.md
+docs/           ARCHITECTURE.md  DEPLOYMENT.md  BANK_SYNC.md
 informe/        LaTeX sources of the project report + informe.pdf
 ```
 

@@ -13,6 +13,8 @@ confirmation before saving anything. Commands:
   /start /menu /help · /summary [mm/yyyy] · /networth · /report [mm/yyyy]
   /expenses [mm/yyyy] · /cashflow [yyyy] · /savings [mm/yyyy] · /banks
   /bank <name> <balance>  (creates or updates an account)
+  Analysis: /pace /merchants /subscriptions /pending /budget /categories
+  Bank mode: /sync /connections /connect /disconnect (see bot_banks.py)
   Free text with expense lines -> preview with Confirm/Cancel.
 """
 from __future__ import annotations
@@ -54,13 +56,82 @@ def _kb(rows: list[list[tuple[str, str]]]) -> dict:
     ]}
 
 
-MENU_KB = _kb([
-    [("📊 Summary", "m:summary"), ("💼 Net worth", "m:networth")],
-    [("🏦 Banks", "m:banks"), ("🧾 Categories", "m:cats")],
-    [("📈 Cashflow", "m:cashflow"), ("📐 Net", "m:net")],
-    [("📄 Report", "m:report"), ("📋 Detailed", "m:detailed")],
-    [("❓ Help", "m:help")],
-])
+def menu_kb(pending: int = 0, bank_mode: bool | None = None) -> dict:
+    """Menu by sections: this month · analysis · money · banks · reports.
+    The bank section only shows in bank mode."""
+    if bank_mode is None:
+        bank_mode = settings.bank_sync_enabled
+    pend = f"🏷 Pending ({pending})" if pending else "🏷 Pending"
+    rows = [
+        [("📊 Summary", "m:summary"), ("⏱ Pace", "m:pace"), ("📐 Net", "m:net")],
+        [("🧾 Categories", "m:cats"), ("🏪 Merchants", "m:merchants")],
+        [("🔁 Subscriptions", "m:subs"), ("🎯 Budgets", "m:budget")],
+        [("💼 Net worth", "m:networth"), ("🏦 Balances", "m:banks"), ("📈 Cashflow", "m:cashflow")],
+    ]
+    if bank_mode:
+        rows += [
+            [(pend, "m:pending"), ("🔄 Sync", "m:sync")],
+            [("🔗 Connections", "m:connections"), ("➕ Connect bank", "m:connect")],
+        ]
+    rows += [
+        [("📄 PDF report", "m:report"), ("📋 Detailed PDF", "m:detailed")],
+        [("❓ Help", "m:help")],
+    ]
+    return _kb(rows)
+
+
+MENU_KB = menu_kb(bank_mode=False)  # backwards compatible
+
+# Commands Telegram suggests when typing "/" (setMyCommands). Order = order in
+# the list. Names: lower case, no accents, <= 32 characters.
+COMMANDS = [
+    ("menu", "Menu with buttons"),
+    ("summary", "Income, expenses, savings and pace of the month [mm/yyyy]"),
+    ("pace", "Spent so far, projection and comparison with last month"),
+    ("expenses", "Expenses by category [mm/yyyy]"),
+    ("merchants", "Where the money goes [mm/yyyy]"),
+    ("subscriptions", "Detected monthly charges and their yearly cost"),
+    ("pending", "Categorise new movements (it learns)"),
+    ("categories", "Your categories and the ones created on their own"),
+    ("budget", "See budgets or set one: Category amount"),
+    ("net", "Income - expenses [mm/yyyy | yyyy | range]"),
+    ("savings", "Savings of the period [mm/yyyy]"),
+    ("cashflow", "Income vs expenses of the year [yyyy]"),
+    ("networth", "Investments + banks"),
+    ("banks", "Balance of each account"),
+    ("bank", "Set a balance by hand: name balance"),
+    ("sync", "Fetch the bank movements now"),
+    ("connections", "Connected banks and days of consent left"),
+    ("connect", "Connect or renew a bank (read-only)"),
+    ("disconnect", "Disconnect a bank (revokes the consent)"),
+    ("report", "PDF with charts [mm/yyyy | yyyy | range]"),
+    ("detailed", "Detailed PDF [period]"),
+    ("help", "All the commands"),
+]
+
+
+async def setup_commands() -> None:
+    """Register the command list for Telegram's autocomplete."""
+    payload = {"commands": [{"command": c, "description": d} for c, d in COMMANDS]}
+    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+        r = await c.post(_url("setMyCommands"), json=payload)
+    log.info("setMyCommands -> %s", r.status_code)
+
+
+def _menu_text() -> tuple[str, dict]:
+    from app.services import bot_banks as bb
+    pending = 0
+    if settings.bank_sync_enabled:
+        db = SessionLocal()
+        try:
+            pending = bb.pending_count(db)
+        except Exception:
+            pending = 0
+        finally:
+            db.close()
+    text = ("🤖 <b>Finance Manager</b>\nWhat do you want to see? "
+            "Type <code>/</code> to list every command.")
+    return text, menu_kb(pending)
 
 
 # --- Sending (async, used by the webhook) ---
@@ -222,7 +293,20 @@ HELP = (
     "/cashflow [yyyy] — income vs expenses of the year\n"
     "/savings [mm/yyyy] — savings of the period\n"
     "/report [mm/yyyy | yyyy | mm/yyyy mm/yyyy] — PDF with charts (ranges allowed)\n"
-    "/detailed [period] — full PDF: net worth, categories and cashflow"
+    "/detailed [period] — full PDF: net worth, categories and cashflow\n\n"
+    "<b>Analysis</b>\n"
+    "/pace — spent so far, projection and comparison with last month\n"
+    "/merchants [mm/yyyy] — where the money goes\n"
+    "/subscriptions — detected monthly charges\n"
+    "/pending — categorise new movements (it learns)\n"
+    "/categories — your categories and the base ones\n"
+    "/budget [category amount] — see or set budgets\n\n"
+    "<b>Bank sync</b> (bank mode only, see docs/BANK_SYNC.md)\n"
+    "/sync — fetch the movements now\n"
+    "/connections — connected banks and days of consent left\n"
+    "/connect — connect or renew a bank (buttons)\n"
+    "/disconnect — remove a bank (what was imported stays)\n\n"
+    "💡 Type <code>/</code> and Telegram suggests the commands."
 )
 
 
@@ -253,8 +337,12 @@ async def handle_update(update: dict) -> None:
     cmd = text.split()[0].lower()
     arg = text[len(cmd):].strip()
 
+    # "/command@MyBot" (groups or autocomplete) -> "/command"
+    cmd = cmd.split("@", 1)[0]
+
     if cmd in ("/start", "/menu"):
-        await send_message(chat_id, HELP, reply_markup=MENU_KB)
+        text_, kb = _menu_text()
+        await send_message(chat_id, text_, reply_markup=kb)
     elif cmd == "/help":
         await send_message(chat_id, HELP)
     elif cmd == "/summary":
@@ -278,9 +366,20 @@ async def handle_update(update: dict) -> None:
         await _send_report(chat_id, arg)
     elif cmd == "/detailed":
         await _send_detailed(chat_id, arg)
+    elif cmd in _BANK_CMDS:
+        await _banks_cmd(chat_id, cmd, arg)
     elif cmd.startswith("/"):
         await send_message(chat_id, "Command not recognised. /help")
     else:
+        from app.services import bot_banks as bb
+        if bb.waiting_for_category() and (":" in text or "\n" in text):
+            bb._WAITING.clear()  # these are entries, not a name: forget the wait
+        if bb.waiting_for_category():  # reply to "✏️ Other category"
+            await send_message(chat_id, bb.typed_category(text))
+            if not bb.waiting_for_category():
+                text_, kb = bb.next_pending()
+                await send_message(chat_id, text_, reply_markup=kb)
+            return
         await _preview_entries(chat_id, text)
 
 
@@ -313,8 +412,37 @@ async def _handle_callback(cb: dict) -> None:
             await _send_report(chat_id, "")
         elif action == "detailed":
             await _send_detailed(chat_id, "")
+        elif f"/{action}" in _MENU_BANK:
+            await _banks_cmd(chat_id, _MENU_BANK[f"/{action}"], "")
         else:
             await send_message(chat_id, HELP)
+        return
+
+    if data == "dn":
+        await edit_message_text(chat_id, message_id, "Cancelled, nothing was disconnected.")
+        return
+    if data.startswith("dd:"):
+        from app.services import bot_banks as bb
+        await edit_message_text(chat_id, message_id, bb.disconnect(data[3:]))
+        return
+    if data.startswith("d:"):
+        from app.services import bot_banks as bb
+        text_, kb = bb.confirm_disconnect(data[2:])
+        await edit_message_text(chat_id, message_id, text_, reply_markup=kb)
+        return
+
+    if data.startswith("k:"):  # bank button in /connect
+        from app.services import bot_banks as bb
+        await edit_message_text(chat_id, message_id, bb.connect_txt(data[2:]))
+        return
+
+    if data.startswith("p:"):
+        from app.services import bot_banks as bb
+        text_, kb, go_on = bb.answer_pending(data)
+        await edit_message_text(chat_id, message_id, text_, reply_markup=kb)
+        if go_on:  # "✏️ Other" waits for the name; "↩" asks for the expense category
+            text_, kb = bb.next_pending()
+            await send_message(chat_id, text_, reply_markup=kb)
         return
 
     if data.startswith("c:ok:"):
@@ -332,6 +460,63 @@ async def _handle_callback(cb: dict) -> None:
         return
 
 
+# --- Bank sync / analysis commands (bot_banks.py) ---
+_BANK_CMDS = {"/pace", "/merchants", "/subscriptions", "/pending", "/budget",
+              "/connect", "/connections", "/sync", "/disconnect", "/categories"}
+# Commands that only make sense with the bank connected (else: "bank sync is off").
+_NEEDS_BANK = {"/connect", "/connections", "/sync", "/disconnect"}
+# menu callback -> command
+_MENU_BANK = {"/pace": "/pace", "/merchants": "/merchants", "/subs": "/subscriptions",
+              "/pending": "/pending", "/budget": "/budget", "/sync": "/sync",
+              "/connections": "/connections", "/connect": "/connect"}
+
+
+async def _banks_cmd(chat_id, cmd: str, arg: str) -> None:
+    import asyncio
+
+    from app.services import bot_banks as bb
+    if cmd in _NEEDS_BANK and not settings.bank_sync_enabled:
+        await send_message(chat_id, bb.OFF_TEXT)
+        return
+    if cmd == "/pace":
+        await send_message(chat_id, bb.pace_txt())
+    elif cmd == "/merchants":
+        await send_message(chat_id, bb.merchants_txt(*_parse_period(arg)))
+    elif cmd == "/subscriptions":
+        await send_message(chat_id, bb.subscriptions_txt())
+    elif cmd == "/pending":
+        bb._SKIPPED.clear()
+        bb._WAITING.clear()
+        text, kb = bb.next_pending()
+        await send_message(chat_id, text, reply_markup=kb)
+    elif cmd == "/budget":
+        await send_message(chat_id, bb.budget_txt(arg))
+    elif cmd == "/connect":
+        if arg.strip():
+            await send_message(chat_id, bb.connect_txt(arg))
+        else:
+            text, kb = bb.choose_bank()
+            await send_message(chat_id, text, reply_markup=kb)
+    elif cmd == "/connections":
+        await send_message(chat_id, bb.connections_txt())
+    elif cmd == "/categories":
+        await send_message(chat_id, bb.categories_txt())
+    elif cmd == "/disconnect":
+        text, kb = bb.disconnect_options()
+        await send_message(chat_id, text, reply_markup=kb)
+    elif cmd == "/sync":
+        await send_message(chat_id, "🔄 Syncing…")
+
+        def _run():
+            db = SessionLocal()
+            try:
+                return bb.run_sync(db)
+            finally:
+                db.close()
+        r = await asyncio.to_thread(_run)
+        await send_message(chat_id, bb.sync_text(r, force=True))
+
+
 # --- Command implementations (sync DB calls inside async funcs; they are quick) ---
 def _summary(year: int, month: int | None) -> str:
     from app.services.aggregation import (
@@ -344,6 +529,11 @@ def _summary(year: int, month: int | None) -> str:
         expense, income = period_totals(db, year, month)
         invested = invested_in_period(db, year, month)
         k = build_dashboard(db, year, month)["kpis"]
+        today = date.today()
+        pace = ""
+        if (year, month) == (today.year, today.month) and expense:
+            from app.services import bot_banks, insights
+            pace = "\n" + bot_banks.pace_line(insights.pace(db, today))
     finally:
         db.close()
     period = f"{MONTHS[month]} {year}" if month else str(year)
@@ -352,7 +542,7 @@ def _summary(year: int, month: int | None) -> str:
         f"📊 <b>Summary {period}</b>\n"
         f"Income: {money(income)}\n"
         f"Expenses: {money(expense)}\n"
-        f"Saved: {money(income - expense)}{note}\n"
+        f"Saved: {money(income - expense)}{note}{pace}\n"
         f"💼 Net worth: {money(k['net_worth'])}\n"
         f"   📈 {money(k['inv_value'])} · 🏦 {money(k['bank_balance'])}"
     )
@@ -544,8 +734,11 @@ def _insert_entries(parsed) -> str:
     total_e = total_i = 0.0
     try:
         for it in parsed.items:
+            # Current month: today's date (it lines up with the bank movements in
+            # /pace and the comparisons). Another month: day 1, as always.
+            day = today if month == today.month else date(today.year, month, 1)
             db.add(Transaction(
-                date=date(today.year, month, 1), year=today.year, month=month,
+                date=day, year=today.year, month=month,
                 category=it.category, kind=it.kind, amount=it.amount,
                 note="telegram",
             ))
@@ -566,10 +759,52 @@ def _insert_entries(parsed) -> str:
 
 
 # --- Month-end reminder (called by the scheduler or the cron, sync) ---
+def send_photo_sync(chat_id: str | int, data: bytes, caption: str = "") -> None:
+    try:
+        httpx.post(_url("sendPhoto"), data={"chat_id": str(chat_id), "caption": caption},
+                   files={"photo": ("chart.png", data, "image/png")}, timeout=60)
+    except Exception as exc:
+        log.warning("send_photo_sync failed: %s", exc)
+
+
+def daily_sync_notice() -> dict:
+    """Daily job: sync the banks and send the alerts (only if there is news)."""
+    from app.services import bot_banks as bb
+    if not settings.bank_sync_enabled:
+        return {"ok": False, "reason": "bank sync is off (manual mode)"}
+    db = SessionLocal()
+    try:
+        r = bb.run_sync(db)
+    finally:
+        db.close()
+    text = bb.sync_text(r)
+    if text and settings.telegram_enabled:
+        for chat_id in settings.allowed_chat_ids:
+            send_message_sync(chat_id, text)
+    return r
+
+
 def month_end_reminder() -> None:
     if not settings.telegram_enabled:
         return
     today = date.today()
+    from app.services import bot_banks as bb
+    db = SessionLocal()
+    try:
+        if bb.has_banks(db):
+            if settings.bank_sync_enabled:
+                try:
+                    bb.run_sync(db)  # so the close includes today's movements
+                except Exception as exc:
+                    log.warning("sync before the close failed: %s", exc)
+            text, img = bb.month_end_summary(db, today)
+            for chat_id in settings.allowed_chat_ids:
+                send_message_sync(chat_id, text)
+                if img:
+                    send_photo_sync(chat_id, img)
+            return
+    finally:
+        db.close()
     for chat_id in (settings.allowed_chat_ids or set()):
         send_message_sync(chat_id, (
             f"📅 End of <b>{MONTHS[today.month]}</b>. "

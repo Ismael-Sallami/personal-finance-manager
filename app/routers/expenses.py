@@ -62,6 +62,8 @@ def index(
     by_cat = defaultdict(lambda: {"expense": Decimal("0"), "income": Decimal("0")})
     total_expense = total_income = Decimal("0")
     for t in txs:
+        if t.kind not in ("expense", "income"):  # transfers between own accounts
+            continue
         by_cat[t.category][t.kind] += t.amount
         if t.kind == "expense":
             total_expense += t.amount
@@ -173,12 +175,14 @@ async def import_save(
     mode = form.get("mode") or "append"
     n = int(form.get("n") or 0)
 
-    # Replace mode: wipe the month before inserting, so re-importing a corrected
-    # list does not duplicate every row.
+    # Replace mode: wipe the entries typed by hand in that month before inserting,
+    # so re-importing a corrected list does not duplicate every row. Entries that
+    # came from the bank are left alone (they would be duplicated again).
     if mode == "replace":
         db.execute(
             sql_delete(Transaction).where(
-                Transaction.year == year, Transaction.month == month
+                Transaction.year == year, Transaction.month == month,
+                Transaction.origin == "manual",
             )
         )
 
@@ -209,6 +213,7 @@ def yearly(
     rows = db.execute(
         select(Transaction.month, Transaction.kind, func.sum(Transaction.amount))
         .where(Transaction.year == year)
+        .where(Transaction.kind.in_(("expense", "income")))
         .group_by(Transaction.month, Transaction.kind)
     ).all()
     months_e = [0.0] * 12

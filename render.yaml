@@ -44,5 +44,13 @@ services:
         sync: false
       - key: TELEGRAM_WEBHOOK_SECRET
         sync: false
+      - key: ENTRY_MODE            # auto | manual | bank (see docs/BANK_SYNC.md)
+        value: auto
+      - key: EB_APP_ID             # Enable Banking (bank mode, read-only)
+        sync: false
+      - key: EB_PRIVATE_KEY        # content of the .pem
+        sync: false
+      - key: BANK_SYNC_FROM        # yyyy-mm-dd: do not import before this date
+        sync: false
       - key: OPENFIGI_API_KEY
         sync: false

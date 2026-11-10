@@ -8,6 +8,7 @@ Jobs (POST /tasks/{job}):
   - snapshot      -> today's net worth snapshot
   - reminder      -> month-end Telegram reminder       [run on the last day]
   - backup        -> database copy sent to your chat   [run weekly]
+  - banksync      -> bank movements and balances + alerts [run daily, bank mode only]
 
 The cron must send the token in the `X-Tasks-Token` header or as `?token=`.
 
@@ -27,7 +28,7 @@ from app.db import get_session
 
 router = APIRouter(prefix="/tasks")
 
-JOBS = {"prices", "contributions", "snapshot", "reminder", "backup"}
+JOBS = {"prices", "contributions", "snapshot", "reminder", "backup", "banksync"}
 
 
 def _authorised(header_token: str | None, query_token: str | None) -> bool:
@@ -43,6 +44,7 @@ def run_task(
     job: str,
     x_tasks_token: str | None = Header(default=None),
     token: str | None = Query(default=None),
+    force: bool = Query(default=False),
     db: Session = Depends(get_session),
 ):
     if not _authorised(x_tasks_token, token):
@@ -64,9 +66,24 @@ def run_task(
         return {"ok": True, "job": job, "total": float(snap.total)}
 
     if job == "reminder":
+        # cron-job.org has no "last day of the month": schedule it on days 28-31
+        # and send only if tomorrow is already another month. ?force=1 sends anyway.
+        import datetime as _dt
+        today = _dt.date.today()
+        if not force and (today + _dt.timedelta(days=1)).month == today.month:
+            return {"ok": True, "job": job, "sent": False, "reason": "not the last day"}
         from app.services.bot import month_end_reminder
         month_end_reminder()
-        return {"ok": True, "job": job}
+        return {"ok": True, "job": job, "sent": True}
+
+    if job == "banksync":
+        from app.services.bot import daily_sync_notice
+        r = daily_sync_notice()
+        # 500 if any account failed (or bank mode is off): the cron shows it red.
+        ok = r.get("ok", True) is not False and not r.get("errors")
+        body = {"ok": ok, "job": job, **{k: v for k, v in r.items() if k != "alerts"},
+                "alerts": len(r.get("alerts", []))}
+        return body if ok else JSONResponse(body, status_code=500)
 
     if job == "backup":
         from app.services.backup import backup_to_telegram

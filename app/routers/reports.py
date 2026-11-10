@@ -70,6 +70,7 @@ def excel_yearly(
     rows = db.execute(
         select(Transaction.month, Transaction.kind, func.sum(Transaction.amount))
         .where(Transaction.year == year)
+        .where(Transaction.kind.in_(("expense", "income")))
         .group_by(Transaction.month, Transaction.kind)
     ).all()
     exp = [0.0] * 12

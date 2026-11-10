@@ -55,6 +55,28 @@ class Settings(BaseSettings):
     # Token that authorises calls to /tasks/*. Empty = endpoints disabled.
     tasks_token: str = ""
 
+    # --- Bank sync (Enable Banking, PSD2 read-only) ---
+    # Empty EB_* = bank mode off, manual mode (see docs/BANK_SYNC.md).
+    # EB_PRIVATE_KEY is the content of the .pem (real newlines or escaped \\n).
+    eb_app_id: str = ""
+    eb_private_key: str = ""
+    # Entries before this date (yyyy-mm-dd) are never imported, so nothing you
+    # already typed by hand gets duplicated. Empty = start of the current month.
+    bank_sync_from: str = ""
+    # How entries get in: auto (bank if EB is configured, else manual) | manual | bank
+    entry_mode: str = "auto"
+
+    @property
+    def bank_sync_enabled(self) -> bool:
+        if self.entry_mode.strip().lower() == "manual":
+            return False
+        return bool(self.eb_app_id.strip() and self.eb_private_key.strip())
+
+    @property
+    def mode(self) -> str:
+        """Effective entry mode: "bank" or "manual"."""
+        return "bank" if self.bank_sync_enabled else "manual"
+
     @property
     def telegram_enabled(self) -> bool:
         return bool(self.telegram_bot_token.strip())
