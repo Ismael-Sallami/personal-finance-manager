@@ -223,65 +223,193 @@ def budget_txt(arg: str) -> str:
 
 
 # --- /pending: categorise with buttons ---
+# Icons per category (normalised name). Your own without an icon get "•".
+_ICONS = {
+    "groceries": "🛒", "supermarket": "🛒", "eating out": "🍽", "restaurants": "🍽",
+    "subscriptions": "🔁", "gym": "💪", "phone & internet": "📱", "transport": "🚌",
+    "fuel": "⛽", "health": "💊", "clothes": "👕", "shopping": "🛍", "studies": "📚",
+    "leisure": "🎬", "rent": "🏠", "home": "🏡", "gifts": "🎁", "travel": "✈️",
+    "investment": "📈", "other": "📦", "salary": "💼", "interest": "💰",
+    "bizum received": "💸", "other income": "➕",
+}
+# Besides the base ones: usual categories that do not come from a merchant.
+_EXTRA_EXPENSE = ["Rent", "Home", "Gifts", "Travel", "Other"]
+_INCOME = ["Salary", "Bizum received", "Interest", "Other income"]
+_SESSION = {"done": 0}
+# Refunds reopened because they left a category negative: id -> category.
+_REOPENED: dict[int, str] = {}
+
+
+# Word contained in the name -> icon (for your own categories). Spanish and
+# English keywords: the first group that matches wins.
+_ICON_WORDS = [
+    (("peluquer", "belleza", "estetica", "barber", "hair", "beauty", "salon"), "💇"),
+    (("super", "alimentacion", "compra", "mercado", "grocer", "food"), "🛒"),
+    (("comida", "restaur", "comer", "cena", "bar", "salida", "eating", "dining", "lunch",
+      "dinner", "takeaway"), "🍽"),
+    (("cafe", "coffee"), "☕"),
+    (("suscrip", "subscri"), "🔁"),
+    (("gym", "gimnas", "deporte", "fitness", "sport"), "💪"),
+    (("movil", "telefon", "internet", "fibra", "phone", "mobile", "broadband"), "📱"),
+    (("transporte", "bus", "tren", "metro", "taxi", "uber", "transport", "train", "commut"),
+     "🚌"),
+    (("gasolina", "combustible", "diesel", "fuel", "petrol"), "⛽"),
+    (("prestamo", "deuda", "tarjeta", "credito", "loan", "debt", "card", "credit"), "💳"),
+    (("coche", "taller", "itv", "parking", "car", "garage", "vehicle"), "🚗"),
+    (("salud", "medic", "farmacia", "dentista", "optica", "health", "pharmac", "dental",
+      "doctor"), "💊"),
+    (("ropa", "calzado", "zapat", "clothes", "clothing", "shoes", "fashion"), "👕"),
+    (("compras", "amazon", "tienda", "shopping", "shop", "store"), "🛍"),
+    (("uni", "estudio", "curso", "libro", "educacion", "material", "academia", "studies",
+      "study", "course", "book", "education", "school", "tuition"), "📚"),
+    (("ocio", "fiesta", "cine", "concierto", "juego", "leisure", "entertainment", "fun",
+      "party", "cinema", "game"), "🎬"),
+    (("alquiler", "piso", "vivienda", "hipoteca", "rent", "mortgage", "housing"), "🏠"),
+    (("casa", "hogar", "mueble", "home", "house", "furniture"), "🏡"),
+    (("luz", "agua", "gas", "suministro", "factura", "electric", "utilit", "water", "bill"),
+     "💡"),
+    (("regalo", "cumple", "gift", "birthday", "present"), "🎁"),
+    (("viaje", "vuelo", "hotel", "vacacion", "travel", "trip", "flight", "holiday",
+      "vacation"), "✈️"),
+    (("mascota", "perro", "gato", "veterin", "pet", "dog", "cat", "vet"), "🐾"),
+    (("bizum",), "💸"),
+    (("inversion", "cripto", "fondo", "accion", "bolsa", "etf", "invest", "crypto", "stock",
+      "fund"), "📈"),
+    (("nomina", "sueldo", "salario", "trabajo", "salary", "payroll", "wage", "work"), "💼"),
+    (("beca", "scholarship", "grant"), "🎓"),
+    (("interes", "dividend", "interest"), "💰"),
+    (("ahorro", "hucha", "saving"), "🐷"),
+    (("seguro", "insurance"), "🛡"),
+    (("efectivo", "cajero", "cash", "atm"), "🏧"),
+    (("impuesto", "hacienda", "multa", "tasa", "tax", "fine", "fee"), "🏛"),
+    (("donacion", "ong", "donation", "charity"), "🤝"),
+    (("loteria", "apuesta", "lottery", "bet", "gambl"), "🎲"),
+    (("tabaco", "tobacco", "cigar"), "🚬"),
+    (("bebe", "nino", "hijo", "baby", "child", "kid"), "🧸"),
+    (("otro", "other", "misc"), "📦"),
+    (("ingreso", "venta", "reembolso", "devolucion", "income", "sale", "refund"), "➕"),
+]
+
+
+def _icon(cat: str) -> str:
+    """Icon for any category: exact name, then a word contained in the name, then
+    the alias of a base category and, if nothing fits, a label."""
+    from app.services.bank_sync import BASE_CATEGORIES, norm
+    n = norm(cat)
+    if n in _ICONS:
+        return _ICONS[n]
+    for words, icon in _ICON_WORDS:
+        if any(w in n for w in words):
+            return icon
+    for name, aliases, _ in BASE_CATEGORIES:
+        if n in aliases and norm(name) in _ICONS:
+            return _ICONS[norm(name)]
+    return "🏷"
+
+
 def _categories(db, kind: str) -> list[str]:
+    """Options to classify: the base ones (with YOUR name if you already have an
+    equivalent) + your categories + a few usual ones. No duplicates."""
+    from app.services.bank_sync import BASE_CATEGORIES, norm
     rows = db.execute(
         select(Transaction.category, func.count()).where(
             Transaction.kind == kind,
             Transaction.category.notin_((UNCATEGORIZED, TRANSFER)),
-        ).group_by(Transaction.category).order_by(func.count().desc()).limit(12)).all()
-    return [c for c, _ in rows]
+        ).group_by(Transaction.category).order_by(func.count().desc())).all()
+    yours = [c for c, _ in rows]
+    by_norm = {norm(c): c for c in yours}
+    out: list[str] = []
+
+    def add(name, aliases=()):
+        real = next((by_norm[a] for a in (norm(name),) + tuple(aliases) if a in by_norm),
+                    name)
+        if norm(real) not in {norm(x) for x in out}:
+            out.append(real)
+
+    if kind == "expense":
+        for name, aliases, _ in BASE_CATEGORIES:
+            if name != "Interest":
+                add(name, aliases)
+        for c in _EXTRA_EXPENSE:
+            add(c)
+    else:
+        for c in _INCOME:
+            add(c)
+    for c in yours:  # your own categories that match no base one
+        add(c)
+    return out[:24]
 
 
-def next_pending() -> tuple[str, dict | None]:
-    """(text, keyboard) of the next entry to categorise."""
-    from app.services.bot import _kb
+def _keyboard(token: str, cats: list[str], first: str | None = None) -> list:
+    order = ([first] if first in cats else []) + [c for c in cats if c != first]
+    buttons = [((f"⭐ {c}" if c == first else f"{_icon(c)} {c}"), f"p:{token}:{cats.index(c)}")
+               for c in order]
+    return [buttons[j:j + 2] for j in range(0, len(buttons), 2)]
+
+
+def _bar(done: int, left: int) -> str:
+    total = done + left
+    full = round(10 * done / total) if total else 10
+    return "▰" * full + "▱" * (10 - full)
+
+
+def next_pending(previous: str = "", tx_id: int | None = None) -> tuple[str, dict | None]:
+    """(text, keyboard) of the next entry to categorise. `previous` is the
+    confirmation of the last one: shown on top, in the same card."""
+    from app.services.bot import _expenses_txt, _kb
+    header = f"{previous}\n\n" if previous else ""
     db = _db()
     try:
         q = select(Transaction).where(Transaction.review.is_(True))
         if _SKIPPED:
             q = q.where(Transaction.id.notin_(tuple(_SKIPPED)))
-        tx = db.scalar(q.order_by(Transaction.date.desc()))
-        total = db.scalar(select(func.count()).select_from(Transaction)
-                          .where(Transaction.review.is_(True))) or 0
+        tx = db.get(Transaction, tx_id) if tx_id else None
+        if tx is None or not tx.review:
+            tx = db.scalar(q.order_by(Transaction.date.desc()))
+        total = pending_count(db)
         if tx is None:
             _SKIPPED.clear()
-            return ("✅ Nothing left to categorise." if not total else
-                    f"⏭ You skipped the {total} that remain. /pending to see them again."), None
+            done, _SESSION["done"] = _SESSION["done"], 0
+            if total:
+                return (header + f"⏭ You skipped the {total} that remain. "
+                        "/pending to see them again."), None
+            today = _today()
+            end = (f"🎉 <b>All categorised!</b>"
+                   + (f" ({done} in this round)" if done else "") + "\n\n")
+            return header + end + _expenses_txt(today.year, today.month), None
         from app.services.bank_sync import is_bizum, pattern_of, suggestion
         cats = _categories(db, tx.kind)
-        every = db.scalars(select(Transaction.category).distinct().where(
-            Transaction.category.notin_((UNCATEGORIZED, TRANSFER)))).all()
-        sug = suggestion(tx.merchant, tx.note, list(every))
+        sug = suggestion(tx.merchant, tx.note, cats)
         if sug and sug not in cats:
-            cats.append(sug)
+            cats.insert(0, sug)
         pattern = pattern_of(tx.merchant, tx.note)
         if pattern:
-            hint = f"I will remember it for everything that says “{pattern}”."
+            hint = f"I will learn “{pattern}” for next time."
         elif is_bizum(tx.merchant, tx.note):
-            hint = "Bizum with no useful description: I will not learn a rule, I will ask every time."
+            hint = "Bizum: you choose every time."
         else:
-            hint = "I will not learn a rule for this one (no recognisable name)."
+            hint = "No recognisable name: I will not learn a rule."
         token = _store_token(tx.id, cats, False)
         incoming = tx.kind == "income"
         sign = "−" if tx.kind == "expense" else "+"
         bizum = "💸 Bizum · " if is_bizum(tx.merchant, tx.note) else ""
-        text = (f"❓ <b>{total} to categorise</b>\n\n"
+        note = (f"\n<i>{html.escape(tx.note)}</i>"
+                if tx.note and tx.note != tx.merchant else "")
+        if tx.id in _REOPENED:
+            note += (f"\n⚠ It subtracted from <b>{html.escape(_REOPENED[tx.id])}</b> and left it "
+                     "negative. Is it income or the refund of another expense?")
+        text = (header +
+                f"<code>{_bar(_SESSION['done'], total)}</code>  <b>{total}</b> left\n\n"
                 f"{tx.date:%d/%m} · {html.escape(tx.account or '')}\n"
-                f"{bizum}<b>{html.escape(tx.merchant or '')}</b> {sign}{money(tx.amount)}"
-                + (f"\n<i>{html.escape(tx.note)}</i>" if tx.note and tx.note != tx.merchant else "")
-                + f"\n\nWhat is it? {hint}")
+                f"{bizum}<b>{html.escape(tx.merchant or '')}</b>  {sign}{money(tx.amount)}"
+                f"{note}\n\n<i>{hint}</i>")
     finally:
         db.close()
-    rows = []
-    if sug:
-        rows.append([(f"💡 {sug}", f"p:{token}:{cats.index(sug)}")])
-    rest = [(c, i) for i, c in enumerate(cats) if c != sug]
-    rows += [[(c, f"p:{token}:{i}") for c, i in rest[j:j + 3]]
-             for j in range(0, len(rest), 3)]
+    rows = _keyboard(token, cats, sug)
     if incoming:
         rows.append([("↩ It is a refund (subtracts from an expense)", f"p:{token}:r")])
-    rows.append([("✏️ Other category", f"p:{token}:n")])
-    rows.append([("🔄 My own transfer", f"p:{token}:t"), ("⏭ Skip", f"p:{token}:s")])
+    rows.append([("✏️ Other", f"p:{token}:n"), ("🔄 My own transfer", f"p:{token}:t"),
+                 ("⏭ Skip", f"p:{token}:s")])
     return text, _kb(rows)
 
 
@@ -302,9 +430,8 @@ def _refund_keyboard(tx_id: int) -> tuple[str, dict]:
     finally:
         db.close()
     token = _store_token(tx_id, cats, True)
-    rows = [[(c, f"p:{token}:{i}") for i, c in enumerate(cats[j:j + 3], j)]
-            for j in range(0, len(cats), 3)]
-    rows.append([("✏️ Other category", f"p:{token}:n"), ("⏭ Skip", f"p:{token}:s")])
+    rows = _keyboard(token, cats)
+    rows.append([("✏️ Other", f"p:{token}:n"), ("⏭ Skip", f"p:{token}:s")])
     return ("↩ Which expense is this refund from? It will subtract from that category "
             "(e.g. a Bizum for the shared wifi subtracts from Home)."), _kb(rows)
 
@@ -318,7 +445,7 @@ def answer_pending(data: str) -> tuple[str, dict | None, bool]:
 
 
 def _answer(data: str):
-    from app.services.bank_sync import learn_rule, mark_transfer
+    from app.services.bank_sync import NoHeadroom, learn_rule, mark_transfer
     try:
         _, token, choice = data.split(":", 2)
     except ValueError:
@@ -344,6 +471,7 @@ def _answer(data: str):
             return "⚠ That entry no longer exists."
         if choice == "t":
             mark_transfer(db, tx)
+            _SESSION["done"] += 1
             return f"🔄 {html.escape(tx.merchant or '')}: transfer between your accounts (not an expense)."
         try:
             cat = cats[int(choice)]
@@ -351,7 +479,13 @@ def _answer(data: str):
             return "⚠ Invalid button."
         from app.services.bank_sync import pattern_of
         pattern = pattern_of(tx.merchant, tx.note)
-        others = learn_rule(db, tx, cat, refund=refund)
+        try:
+            others = learn_rule(db, tx, cat, refund=refund)
+        except NoHeadroom as e:
+            db.rollback()
+            return next_pending(previous=_headroom_notice(e), tx_id=tx_id)
+        _REOPENED.pop(tx_id, None)
+        _SESSION["done"] += 1 + others
         extra = f" (and {others} more like it)" if others else ""
         rule = f"\n<i>Rule: “{pattern}” → {html.escape(cat)}</i>" if pattern else ""
         ref = " (refund: subtracts from the expense)" if refund else ""
@@ -473,7 +607,12 @@ def typed_category(text: str) -> str:
         existing = db.scalars(select(Transaction.category).distinct()).all()
         name = next((c for c in existing if norm(c) == norm(name)), name)
         is_new = name not in existing
-        others = learn_rule(db, tx, name, refund=refund)
+        from app.services.bank_sync import NoHeadroom
+        try:
+            others = learn_rule(db, tx, name, refund=refund)
+        except NoHeadroom as e:
+            db.rollback()
+            return _headroom_notice(e)
         extra = f" (and {others} more like it)" if others else ""
         tag = " 🆕" if is_new else ""
         return f"✅ {html.escape(tx.merchant or '')} → <b>{html.escape(name)}</b>{tag}{extra}"
@@ -556,3 +695,63 @@ def categories_txt() -> str:
     if new:
         lines.append("\n<b>Created on their own when they show up</b>\n" + ", ".join(new))
     return "\n".join(lines)
+
+
+def _headroom_notice(e) -> str:
+    return (f"⚠ <b>{html.escape(e.category)}</b> only has {money(e.headroom)} of expense that "
+            f"month: subtracting {money(e.amount)} would leave it negative.\n"
+            "Choose an income (💸 Bizum received, ➕ Other income) or the refund of another expense.")
+
+
+def reopen_negatives_bot() -> int:
+    """When /pending opens: send back to pending whatever leaves expenses negative."""
+    from app.services.bank_sync import reopen_negatives
+    db = _db()
+    try:
+        cats = {t.id: t.category for t in db.scalars(select(Transaction).where(
+            Transaction.kind == "expense", Transaction.amount < 0)).all()}
+        ids = reopen_negatives(db)
+    finally:
+        db.close()
+    for i in ids:
+        _REOPENED[i] = cats.get(i, "?")
+    return len(ids)
+
+
+def income_txt(year: int, month: int | None) -> str:
+    db = _db()
+    try:
+        cond = [Transaction.kind == "income", Transaction.year == year]
+        if month:
+            cond.append(Transaction.month == month)
+        rows = db.execute(select(Transaction.category, func.sum(Transaction.amount),
+                                 func.count()).where(*cond)
+                          .group_by(Transaction.category)
+                          .order_by(func.sum(Transaction.amount).desc())).all()
+    finally:
+        db.close()
+    period = f"{MONTHS[month]} {year}" if month else str(year)
+    if not rows:
+        return f"💶 No income in {period}."
+    total = sum(v for _, v, _ in rows)
+    lines = "\n".join(f"{_icon(c)} {html.escape(c)}: {money(v)}" + (f" ({n}×)" if n > 1 else "")
+                      for c, v, n in rows)
+    return f"💶 <b>Income · {period}</b>\n{lines}\n\n<b>Total: {money(total)}</b>"
+
+
+def negatives_notice(year: int, month: int | None) -> str:
+    """Warning line if some expense category ends up negative."""
+    db = _db()
+    try:
+        cond = [Transaction.kind == "expense", Transaction.year == year]
+        if month:
+            cond.append(Transaction.month == month)
+        neg = db.execute(select(Transaction.category, func.sum(Transaction.amount))
+                         .where(*cond).group_by(Transaction.category)
+                         .having(func.sum(Transaction.amount) < 0)).all()
+    finally:
+        db.close()
+    if not neg:
+        return ""
+    names = ", ".join(f"{html.escape(c)} ({money(v)})" for c, v in neg)
+    return f"\n\n⚠ Negative: {names}. Reassign them in /pending."

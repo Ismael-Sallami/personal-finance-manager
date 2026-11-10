@@ -207,15 +207,78 @@ def expense_only_categories(db: Session) -> set[str]:
     return {c for c in expenses - incomes if c not in (UNCATEGORIZED, TRANSFER)}
 
 
+class NoHeadroom(ValueError):
+    """A refund would leave the category negative that month."""
+
+    def __init__(self, category: str, headroom: Decimal, amount: Decimal):
+        super().__init__(category)
+        self.category, self.headroom, self.amount = category, headroom, amount
+
+
+def month_expense(db: Session, category: str, year: int, month: int,
+                  exclude_id: int | None = None) -> Decimal:
+    cond = [Transaction.kind == "expense", Transaction.category == category,
+            Transaction.year == year, Transaction.month == month]
+    if exclude_id is not None:
+        cond.append(Transaction.id != exclude_id)
+    return Decimal(str(db.scalar(select(func.sum(Transaction.amount)).where(*cond)) or 0))
+
+
 def assign_category(tx: Transaction, category: str, expense_only: set[str],
-                    refund: bool = False) -> None:
+                    refund: bool = False, db: Session | None = None,
+                    strict: bool = False) -> bool:
     """Set the category. Money coming IN under an expense category (a Bizum for
     the shared wifi, a shop refund...) is a refund: it is stored as a negative
-    expense, so it subtracts from that category instead of inflating income."""
-    tx.category, tx.review = category, False
+    expense, so it subtracts from that category instead of inflating income.
+
+    It never leaves a category negative in the month: if there is not enough
+    expense, with `strict` it raises NoHeadroom (the user picks something else);
+    otherwise it leaves the entry pending as income. Returns whether it applied."""
     incoming = tx.kind == "income" or (tx.kind == "expense" and tx.amount < 0)
     if incoming and (refund or category in expense_only):
-        tx.kind, tx.amount = "expense", -abs(tx.amount)
+        amount = abs(tx.amount)
+        if db is not None:
+            headroom = month_expense(db, category, tx.year, tx.month, tx.id)
+            if headroom < amount:
+                if strict:
+                    raise NoHeadroom(category, headroom, amount)
+                tx.kind, tx.amount = "income", amount
+                tx.category, tx.review = UNCATEGORIZED, True
+                return False
+        tx.category, tx.review = category, False
+        tx.kind, tx.amount = "expense", -amount
+        return True
+    tx.category, tx.review = category, False
+    return True
+
+
+def reopen_negatives(db: Session) -> list[int]:
+    """Expense categories with a negative total in a month (too many refunds):
+    their bank refunds go back to pending, as income, until the category is
+    >= 0. Returns the reopened ids."""
+    neg = db.execute(
+        select(Transaction.category, Transaction.year, Transaction.month,
+               func.sum(Transaction.amount))
+        .where(Transaction.kind == "expense")
+        .group_by(Transaction.category, Transaction.year, Transaction.month)
+        .having(func.sum(Transaction.amount) < 0)).all()
+    ids = []
+    for cat, y, m, total in neg:
+        total = Decimal(str(total))
+        for tx in db.scalars(select(Transaction).where(
+                Transaction.kind == "expense", Transaction.category == cat,
+                Transaction.year == y, Transaction.month == m,
+                Transaction.amount < 0, Transaction.origin == "bank")
+                .order_by(Transaction.amount)).all():
+            if total >= 0:
+                break
+            total -= tx.amount
+            tx.kind, tx.amount = "income", abs(tx.amount)
+            tx.category, tx.review = UNCATEGORIZED, True
+            ids.append(tx.id)
+    if ids:
+        db.commit()
+    return ids
 
 
 def user_rules(db: Session) -> dict[str, str]:
@@ -293,7 +356,7 @@ def save_movements(db: Session, link: BankLink, raws: list[dict],
             merchant=m.merchant, account=acc.name, review=review,
         )
         if kind != "transfer" and not review:
-            assign_category(tx, cat, expense_only)
+            assign_category(tx, cat, expense_only, db=db)
         db.add(tx)
         if kind != "transfer":
             res.new.append(tx)
@@ -337,6 +400,7 @@ def sync_all(db: Session, today: date | None = None, client=None) -> SyncResult:
 def reclassify_pending(db: Session) -> int:
     """Run transfers and rules again over what is pending (e.g. after improving
     the rules or learning a new one). Returns how many stop being pending."""
+    reopen_negatives(db)
     rules = user_rules(db)
     expense_only = expense_only_categories(db)
     existing_cats = existing_categories(db)
@@ -349,8 +413,7 @@ def reclassify_pending(db: Session) -> int:
             n += 1
             continue
         cat = categorize(text, rules, existing_cats)
-        if cat:
-            assign_category(tx, cat, expense_only)
+        if cat and assign_category(tx, cat, expense_only, db=db):
             n += 1
     db.commit()
     return n
@@ -361,7 +424,7 @@ def learn_rule(db: Session, tx: Transaction, category: str, refund: bool = False
     other pending entries that match. Returns how many others were recategorised.
     `refund`: money that comes in but subtracts from an expense category."""
     expense_only = expense_only_categories(db) | ({category} if refund else set())
-    assign_category(tx, category, expense_only, refund)
+    assign_category(tx, category, expense_only, refund, db=db, strict=True)
     pattern = pattern_of(tx.merchant, tx.note)
     others = 0
     if pattern:
@@ -373,8 +436,8 @@ def learn_rule(db: Session, tx: Transaction, category: str, refund: bool = False
         for p in db.scalars(select(Transaction).where(
                 Transaction.review.is_(True), Transaction.id != tx.id)).all():
             if matches(pattern, norm(f"{p.merchant} {p.note}")):
-                assign_category(p, category, expense_only)
-                others += 1
+                if assign_category(p, category, expense_only, db=db):
+                    others += 1
     db.commit()
     return others
 

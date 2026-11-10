@@ -64,7 +64,7 @@ def menu_kb(pending: int = 0, bank_mode: bool | None = None) -> dict:
     pend = f"🏷 Pending ({pending})" if pending else "🏷 Pending"
     rows = [
         [("📊 Summary", "m:summary"), ("⏱ Pace", "m:pace"), ("📐 Net", "m:net")],
-        [("🧾 Categories", "m:cats"), ("🏪 Merchants", "m:merchants")],
+        [("🧾 Expenses", "m:cats"), ("💶 Income", "m:income"), ("🏪 Merchants", "m:merchants")],
         [("🔁 Subscriptions", "m:subs"), ("🎯 Budgets", "m:budget")],
         [("💼 Net worth", "m:networth"), ("🏦 Balances", "m:banks"), ("📈 Cashflow", "m:cashflow")],
     ]
@@ -89,6 +89,7 @@ COMMANDS = [
     ("summary", "Income, expenses, savings and pace of the month [mm/yyyy]"),
     ("pace", "Spent so far, projection and comparison with last month"),
     ("expenses", "Expenses by category [mm/yyyy]"),
+    ("income", "Income by category [mm/yyyy]"),
     ("merchants", "Where the money goes [mm/yyyy]"),
     ("subscriptions", "Detected monthly charges and their yearly cost"),
     ("pending", "Categorise new movements (it learns)"),
@@ -290,6 +291,7 @@ HELP = (
     "/banks — balance per account\n"
     "/bank &lt;name&gt; &lt;balance&gt; — update an account\n"
     "/expenses [mm/yyyy] — expenses by category\n"
+    "/income [mm/yyyy] — income by category\n"
     "/cashflow [yyyy] — income vs expenses of the year\n"
     "/savings [mm/yyyy] — savings of the period\n"
     "/report [mm/yyyy | yyyy | mm/yyyy mm/yyyy] — PDF with charts (ranges allowed)\n"
@@ -357,6 +359,9 @@ async def handle_update(update: dict) -> None:
         await send_message(chat_id, _bank_set(arg))
     elif cmd == "/expenses":
         await send_message(chat_id, _expenses_txt(*_parse_period(arg)))
+    elif cmd == "/income":
+        from app.services import bot_banks as bb
+        await send_message(chat_id, bb.income_txt(*_parse_period(arg)))
     elif cmd == "/cashflow":
         year, _ = _parse_period(arg)
         await send_message(chat_id, _cashflow_txt(year))
@@ -404,6 +409,9 @@ async def _handle_callback(cb: dict) -> None:
             await send_message(chat_id, _banks_txt())
         elif action == "cats":
             await send_message(chat_id, _expenses_txt(*_parse_period("")))
+        elif action == "income":
+            from app.services import bot_banks as bb
+            await send_message(chat_id, bb.income_txt(*_parse_period("")))
         elif action == "cashflow":
             await send_message(chat_id, _cashflow_txt(date.today().year))
         elif action == "net":
@@ -439,10 +447,9 @@ async def _handle_callback(cb: dict) -> None:
     if data.startswith("p:"):
         from app.services import bot_banks as bb
         text_, kb, go_on = bb.answer_pending(data)
+        if go_on:  # same card: confirmation on top + next entry
+            text_, kb = bb.next_pending(previous=text_)
         await edit_message_text(chat_id, message_id, text_, reply_markup=kb)
-        if go_on:  # "✏️ Other" waits for the name; "↩" asks for the expense category
-            text_, kb = bb.next_pending()
-            await send_message(chat_id, text_, reply_markup=kb)
         return
 
     if data.startswith("c:ok:"):
@@ -487,6 +494,8 @@ async def _banks_cmd(chat_id, cmd: str, arg: str) -> None:
     elif cmd == "/pending":
         bb._SKIPPED.clear()
         bb._WAITING.clear()
+        bb._SESSION["done"] = 0
+        bb.reopen_negatives_bot()
         text, kb = bb.next_pending()
         await send_message(chat_id, text, reply_markup=kb)
     elif cmd == "/budget":
@@ -621,10 +630,13 @@ def _expenses_txt(year: int, month: int | None) -> str:
     period = f"{MONTHS[month]} {year}" if month else str(year)
     if not cats["labels"]:
         return f"🧾 No expenses in {period}."
+    from app.services import bot_banks as bb
     rows = "\n".join(
-        f"• {lbl}: {money(val)}" for lbl, val in zip(cats["labels"], cats["data"])
+        f"{bb._icon(lbl)} {lbl}: {money(val)}" for lbl, val in zip(cats["labels"], cats["data"])
     )
-    return f"🧾 <b>Expenses by category · {period}</b>\n{rows}"
+    total = sum(cats["data"])
+    return (f"🧾 <b>Expenses by category · {period}</b>\n{rows}\n\n<b>Total: {money(total)}</b>"
+            + bb.negatives_notice(year, month))
 
 
 def _cashflow_txt(year: int) -> str:

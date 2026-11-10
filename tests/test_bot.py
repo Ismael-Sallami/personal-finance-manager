@@ -18,11 +18,15 @@ def captured(monkeypatch):
     edits: list[tuple] = []
     docs: list[tuple] = []
 
+    todo: list[tuple] = []  # messages and edits in order: (text, keyboard)
+
     async def fake_send(chat_id, text, reply_markup=None):
         msgs.append((chat_id, text, reply_markup))
+        todo.append((text, reply_markup))
 
     async def fake_edit(chat_id, message_id, text, reply_markup=None):
-        edits.append((chat_id, message_id, text))
+        edits.append((chat_id, message_id, text, reply_markup))
+        todo.append((text, reply_markup))
 
     async def fake_answer(callback_id, text=""):
         pass
@@ -40,7 +44,8 @@ def captured(monkeypatch):
     monkeypatch.setattr(bot, "SessionLocal", sessionmaker(bind=engine))
     monkeypatch.setattr(settings, "telegram_chat_id", "999", raising=False)
     bot._PENDING.clear()
-    return {"msgs": msgs, "edits": edits, "docs": docs, "engine": engine}
+    return {"msgs": msgs, "edits": edits, "docs": docs, "engine": engine,
+            "todo": todo}
 
 
 def _run(coro):

@@ -36,8 +36,13 @@ def _cb(data):
                                "message": {"message_id": 1, "chat": {"id": 999}}}}
 
 
+def _last(captured):
+    """(text, keyboard) of the last thing shown (new message or edited card)."""
+    return captured["todo"][-1]
+
+
 def _button(captured, text):
-    kb = captured["msgs"][-1][2]
+    kb = _last(captured)[1]
     return next(b["callback_data"] for row in kb["inline_keyboard"] for b in row
                 if b["text"] == text)
 
@@ -71,16 +76,21 @@ def test_pending_categorises_and_learns(captured):
     a = _tx(S, category="Uncategorized", review=True, merchant="NEWSSTAND PEPE 1")
     b = _tx(S, category="Uncategorized", review=True, merchant="NEWSSTAND PEPE 2")
     _run(bot.handle_update(_msg("/pending")))
-    text, kb = captured["msgs"][-1][1], captured["msgs"][-1][2]
-    assert "2 to categorise" in text
-    button = next(btn for row in kb["inline_keyboard"] for btn in row
-                  if btn["text"] == "Restaurants")
-    _run(bot.handle_update(_cb(button["callback_data"])))
-    assert "and 1 more" in captured["edits"][-1][2]
+    text, kb = _last(captured)
+    assert "<b>2</b> left" in text
+    labels = [b["text"] for row in kb["inline_keyboard"] for b in row]
+    # every category, even if it does not exist yet, with an icon; your
+    # "Restaurants" replaces the base "Eating out" (alias)
+    assert "🛒 Groceries" in labels and "💪 Gym" in labels
+    assert "🍽 Restaurants" in labels and "🍽 Eating out" not in labels
+    _run(bot.handle_update(_cb(_button(captured, "🍽 Restaurants"))))
+    final = _last(captured)[0]
+    assert "and 1 more" in final and "All categorised" in final
+    assert "Expenses by category" in final  # the month's breakdown at the end
+    assert len(captured["msgs"]) == 1  # everything in the same card
     s = S()
     assert {s.get(Transaction, i).category for i in (a, b)} == {"Restaurants"}
     assert s.scalar(select(CategoryRule)).pattern == "newsstand"
-    assert "Nothing left" in captured["msgs"][-1][1]
 
 
 def test_pending_transfer_and_skip(captured):
@@ -89,12 +99,8 @@ def test_pending_transfer_and_skip(captured):
     _tx(S, category="Uncategorized", review=True, merchant="B",
         day=date.today() - timedelta(days=1))
     _run(bot.handle_update(_msg("/pending")))
-    kb = captured["msgs"][-1][2]
-    skip = kb["inline_keyboard"][-1][1]["callback_data"]
-    _run(bot.handle_update(_cb(skip)))             # skips A (the most recent)
-    kb = captured["msgs"][-1][2]
-    transfer = kb["inline_keyboard"][-1][0]["callback_data"]
-    _run(bot.handle_update(_cb(transfer)))         # B -> transfer
+    _run(bot.handle_update(_cb(_button(captured, "⏭ Skip"))))              # skips A
+    _run(bot.handle_update(_cb(_button(captured, "🔄 My own transfer"))))  # B -> transfer
     s = S()
     assert s.get(Transaction, a).review is True
     assert s.scalar(select(Transaction).where(Transaction.merchant == "B")).kind == "transfer"
@@ -292,10 +298,10 @@ def test_typed_category_creates_and_learns(captured):
     _tx(S, category="Groceries", merchant="X")
     a = _tx(S, category="Uncategorized", review=True, merchant="VET LUNA")
     _run(bot.handle_update(_msg("/pending")))
-    _run(bot.handle_update(_cb(_button(captured, "✏️ Other category"))))
-    assert "Type the category name" in captured["edits"][-1][2]
+    _run(bot.handle_update(_cb(_button(captured, "✏️ Other"))))
+    assert "Type the category name" in _last(captured)[0]
     _run(bot.handle_update(_msg("Pets")))
-    assert "Pets</b> 🆕" in captured["msgs"][-2][1]
+    assert any("Pets</b> 🆕" in m[1] for m in captured["msgs"])
     s = S()
     assert s.get(Transaction, a).category == "Pets"
     assert s.scalar(select(CategoryRule)).category == "Pets"
@@ -307,7 +313,7 @@ def test_typed_category_reuses_existing_spelling(captured):
     _tx(S, category="Groceries", merchant="X")
     a = _tx(S, category="Uncategorized", review=True, merchant="LIDL")
     _run(bot.handle_update(_msg("/pending")))
-    _run(bot.handle_update(_cb(_button(captured, "✏️ Other category"))))
+    _run(bot.handle_update(_cb(_button(captured, "✏️ Other"))))
     _run(bot.handle_update(_msg("groceries")))
     assert S().get(Transaction, a).category == "Groceries"
 
@@ -316,7 +322,7 @@ def test_entries_while_waiting_are_not_a_category(captured):
     S = sessionmaker(bind=captured["engine"])
     _tx(S, category="Uncategorized", review=True, merchant="A")
     _run(bot.handle_update(_msg("/pending")))
-    _run(bot.handle_update(_cb(_button(captured, "✏️ Other category"))))
+    _run(bot.handle_update(_cb(_button(captured, "✏️ Other"))))
     _run(bot.handle_update(_msg("- Groceries: 12")))
     assert "Confirm?" in captured["msgs"][-1][1]  # goes through the normal entry flow
     assert not bot_banks.waiting_for_category()
@@ -360,10 +366,10 @@ def test_pending_with_suggestion_and_visible_rule(captured):
     _tx(S, category="Groceries", merchant="LIDL")
     _tx(S, category="Uncategorized", review=True, merchant="Primaprix Norte Ii")
     _run(bot.handle_update(_msg("/pending")))
-    text, kb = captured["msgs"][-1][1], captured["msgs"][-1][2]
+    text, kb = _last(captured)
     assert "“primaprix”" in text
     first = kb["inline_keyboard"][0][0]
-    assert first["text"] == "💡 Groceries"
+    assert first["text"] == "⭐ Groceries"
     _run(bot.handle_update(_cb(first["callback_data"])))
     assert "Rule: “primaprix” → Groceries" in captured["edits"][-1][2]
 
@@ -379,7 +385,7 @@ def test_bizum_refund_subtracts_from_the_expense(captured):
             note="Wifi Bizum payment from: A.B.C.")
     _run(bot.handle_update(_msg("/pending")))
     _run(bot.handle_update(_cb(_button(captured, "↩ It is a refund (subtracts from an expense)"))))
-    assert "Which expense" in captured["edits"][-1][2]
+    assert "Which expense" in _last(captured)[0]
     token = next(k for k, v in bot_banks._CATEG.items() if v[2])
     idx = bot_banks._CATEG[token][1].index("Home")
     _run(bot.handle_update(_cb(f"p:{token}:{idx}")))
@@ -412,3 +418,63 @@ def test_categories_lists_yours_and_the_base_ones(captured):
     text = captured["msgs"][-1][1]
     assert "Food" in text and "Gym" in text
     assert "Groceries" not in text  # alias of your "Food": not duplicated
+
+
+def test_refund_without_headroom_never_goes_negative(captured):
+    S = sessionmaker(bind=captured["engine"])
+    _tx(S, category="Home", merchant="DIGI", amount=Decimal("5"))  # only 5 in Home
+    b = _tx(S, category="Uncategorized", review=True, kind="income",
+            amount=Decimal("20"), merchant="Wifi Bizum payment from: X", note="Wifi Bizum")
+    _run(bot.handle_update(_msg("/pending")))
+    _run(bot.handle_update(_cb(_button(captured, "↩ It is a refund (subtracts from an expense)"))))
+    _run(bot.handle_update(_cb(_button(captured, "🏡 Home"))))
+    text, kb = _last(captured)
+    assert "negative" in text and kb is not None  # back to the card
+    t = S().get(Transaction, b)
+    assert (t.kind, t.amount, t.review) == ("income", Decimal("20"), True)
+    _run(bot.handle_update(_cb(_button(captured, "💸 Bizum received"))))
+    t = S().get(Transaction, b)
+    assert (t.kind, t.category, t.review) == ("income", "Bizum received", False)
+
+
+def test_existing_negatives_are_reopened_and_flagged(captured):
+    S = sessionmaker(bind=captured["engine"])
+    neg = _tx(S, category="Home", amount=Decimal("-6.67"), merchant="Wifi Bizum")
+    _run(bot.handle_update(_msg("/expenses")))
+    assert "Negative: Home" in captured["msgs"][-1][1]
+    _run(bot.handle_update(_msg("/pending")))
+    assert "subtracted from <b>Home</b>" in _last(captured)[0]
+    t = S().get(Transaction, neg)
+    assert (t.kind, t.amount, t.review) == ("income", Decimal("6.67"), True)
+
+
+def test_automatic_refund_without_headroom_stays_pending(db):
+    from app.services import bank_sync as bs
+    d = date.today()
+    db.add(Transaction(date=d, year=d.year, month=d.month, category="Home", kind="expense",
+                       amount=Decimal("5"), origin="bank", merchant="DIGI"))
+    tx = Transaction(date=d, year=d.year, month=d.month, category="Uncategorized",
+                     kind="income", amount=Decimal("20"), origin="bank", review=True)
+    db.add(tx)
+    db.commit()
+    assert bs.assign_category(tx, "Home", {"Home"}, db=db) is False
+    assert (tx.kind, tx.review) == ("income", True)
+
+
+def test_income_by_category(captured):
+    S = sessionmaker(bind=captured["engine"])
+    _tx(S, category="Salary", kind="income", amount=Decimal("1200"), merchant="ACME")
+    _tx(S, category="Interest", kind="income", amount=Decimal("3.10"), merchant="TR")
+    _run(bot.handle_update(_msg("/income")))
+    text = captured["msgs"][-1][1]
+    assert "💼 Salary" in text and "💰 Interest" in text and "1,203.10" in text or "1.203,10" in text
+
+
+def test_every_category_has_an_icon():
+    cases = {"Utilities": "💡", "Suministros": "💡", "Eating out": "🍽", "Comida": "🍽",
+             "Salary": "💼", "Nomina": "💼", "Investments": "📈", "Car": "🚗",
+             "Coche": "🚗", "Pets": "🐾", "Mascotas": "🐾", "Groceries": "🛒",
+             "Rent": "🏠", "Weird thing": "🏷"}
+    for cat, icon in cases.items():
+        assert bot_banks._icon(cat) == icon, cat
+    assert all(bot_banks._icon(c) != "•" for c in ("Xyz", "Bizums", "Education"))
