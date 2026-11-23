@@ -81,7 +81,7 @@ def test_pending_categorises_and_learns(captured):
     labels = [b["text"] for row in kb["inline_keyboard"] for b in row]
     # every category, even if it does not exist yet, with an icon; your
     # "Restaurants" replaces the base "Eating out" (alias)
-    assert "🛒 Groceries" in labels and "💪 Gym" in labels
+    assert "🛒 Groceries" in labels and "💪 Sport" in labels
     assert "🍽 Restaurants" in labels and "🍽 Eating out" not in labels
     _run(bot.handle_update(_cb(_button(captured, "🍽 Restaurants"))))
     final = _last(captured)[0]
@@ -416,7 +416,7 @@ def test_categories_lists_yours_and_the_base_ones(captured):
     _tx(S, category="Food", amount=Decimal("40"))
     _run(bot.handle_update(_msg("/categories")))
     text = captured["msgs"][-1][1]
-    assert "Food" in text and "Gym" in text
+    assert "Food" in text and "Sport" in text
     assert "Groceries" not in text  # alias of your "Food": not duplicated
 
 
@@ -676,3 +676,22 @@ def test_balance_new_savings_account_and_net_worth(captured):
     _run(bot.handle_update(_msg("/networth")))
     p = captured["msgs"][-1][1]
     assert "🐷 Savings / interest" in p and "📈 Invested" in p and "4,400.00" in p
+
+
+def test_compact_category_options(captured):
+    S = sessionmaker(bind=captured["engine"])
+    _tx(S, category="Gym", merchant="X")  # your "Gym" replaces the base "Sport" (alias)
+    _tx(S, category="Uncategorized", review=True, merchant="NEWSTAND")
+    _run(bot.handle_update(_msg("/pending")))
+    labels = [b["text"] for row in _last(captured)[1]["inline_keyboard"] for b in row]
+    for want in ("💡 Utilities", "💇 Hairdresser", "🚗 Car", "✈️ Travel", "🎁 Gifts",
+                 "🏠 Housing", "📈 Investment", "🛍 Shopping & tech", "📱 Phone", "💪 Gym"):
+        assert want in labels, want
+    assert "💪 Sport" not in labels
+    db = bot_banks._db()
+    try:
+        income = bot_banks._categories(db, "income")
+    finally:
+        db.close()
+    assert income[:7] == ["Salary", "Grants", "Ride sharing", "Refunds", "Bizum received",
+                          "Interest", "Other income"]
