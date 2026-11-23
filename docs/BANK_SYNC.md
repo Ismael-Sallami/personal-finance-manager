@@ -137,6 +137,32 @@ into transfers; No marks them reviewed and it is never asked again. The daily
 sync warns you when there is any pair waiting. The account owner (`REPORT_OWNER`)
 is recognised with any two words of the name.
 
+### Category set
+
+The built-in categories are a compact set: Groceries, Eating out, Leisure, Sport,
+Housing, Utilities, Phone, Subscriptions, Fuel, Car, Transport, Travel, Clothes,
+Shopping & tech, Health, Hairdresser, Studies, Gifts and Investment. Income
+options are Salary, Grants, Ride sharing, Refunds, Bizum received, Interest and
+Other income. If you already have a category with an equivalent name (for example
+"Gym" for Sport) yours is used instead. Every category gets an icon.
+
+To merge an existing messy history into your own set, write a mapping file and
+run the generic script (dry run by default, `--apply` writes after saving a JSON
+backup of the rows it changes):
+
+```json
+{"expense": {"Groceries": ["Food", "Supermarket"], "Sport": ["Gym"]},
+ "income":  {"Salary": ["Payroll"]}}
+```
+
+```
+python scripts/merge_categories.py mapping.json            # shows what would change
+python scripts/merge_categories.py mapping.json --apply    # backup + write
+```
+
+It renames transactions and the learned rules (names match ignoring case and
+accents). YAML works too if PyYAML is installed.
+
 ## 5. Renewing the consent
 
 A consent lasts 90 to 180 days depending on the bank. Ten days before it ends

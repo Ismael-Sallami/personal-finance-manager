@@ -279,10 +279,24 @@ _ICONS = {
     "leisure": "🎬", "rent": "🏠", "home": "🏡", "gifts": "🎁", "travel": "✈️",
     "investment": "📈", "other": "📦", "salary": "💼", "interest": "💰",
     "bizum received": "💸", "other income": "➕",
+    # compact category set
+    "sport": "💪", "housing": "🏠", "utilities": "💡", "phone": "📱", "car": "🚗",
+    "shopping & tech": "🛍", "hairdresser": "💇", "grants": "🎓", "ride sharing": "🚗",
+    "refunds": "↩",
+    # Spanish names
+    "deporte": "💪", "piso": "🏠", "suministros": "💡", "movil": "📱", "coche": "🚗",
+    "viajes": "✈️", "peluqueria": "💇", "regalos": "🎁", "compras y tecnologia": "🛍",
+    "trabajo": "💼", "becas": "🎓", "blablacar": "🚗", "devoluciones": "↩",
 }
 # Besides the base ones: usual categories that do not come from a merchant.
-_EXTRA_EXPENSE = ["Rent", "Home", "Gifts", "Travel", "Other"]
-_INCOME = ["Salary", "Bizum received", "Interest", "Other income"]
+# name -> aliases (normalised): your own category with one of them is used instead.
+_EXTRA_EXPENSE = {"Housing": ("rent", "home", "flat", "piso"), "Investment": ("investments",),
+                  "Other": ("others", "misc")}
+_INCOME = {"Salary": ("payroll", "work", "nomina", "trabajo"),
+           "Grants": ("grant", "scholarship", "becas"),
+           "Ride sharing": ("blablacar", "carpool"),
+           "Refunds": ("refund", "devoluciones"),
+           "Bizum received": (), "Interest": (), "Other income": ()}
 _SESSION = {"done": 0}
 # Refunds reopened because they left a category negative: id -> category.
 _REOPENED: dict[int, str] = {}
@@ -303,7 +317,7 @@ _ICON_WORDS = [
      "🚌"),
     (("gasolina", "combustible", "diesel", "fuel", "petrol"), "⛽"),
     (("prestamo", "deuda", "tarjeta", "credito", "loan", "debt", "card", "credit"), "💳"),
-    (("coche", "taller", "itv", "parking", "car", "garage", "vehicle"), "🚗"),
+    (("coche", "taller", "itv", "parking", "car", "garage", "vehicle", "ride"), "🚗"),
     (("salud", "medic", "farmacia", "dentista", "optica", "health", "pharmac", "dental",
       "doctor"), "💊"),
     (("ropa", "calzado", "zapat", "clothes", "clothing", "shoes", "fashion"), "👕"),
@@ -378,11 +392,11 @@ def _categories(db, kind: str) -> list[str]:
         for name, aliases, _ in BASE_CATEGORIES:
             if name != "Interest":
                 add(name, aliases)
-        for c in _EXTRA_EXPENSE:
-            add(c)
+        for c, aliases in _EXTRA_EXPENSE.items():
+            add(c, aliases)
     else:
-        for c in _INCOME:
-            add(c)
+        for c, aliases in _INCOME.items():
+            add(c, aliases)
     for c in yours:  # your own categories that match no base one
         add(c)
     return out[:24]

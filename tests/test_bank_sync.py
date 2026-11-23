@@ -107,13 +107,15 @@ def test_base_categories_real_cases():
         "Mercadona Main Street": "Groceries", "Primaprix Norte Ii": "Groceries",
         "Lidl": "Groceries", "Aldi Madrid": "Groceries", "DIA 1234": "Groceries",
         "E S Alcampo Norte": "Fuel",                 # service station, not the supermarket
-        "Basic-Fit Campus": "Gym",
+        "Basic-Fit Campus": "Sport",
         "Spotify P48FDBA77": "Subscriptions", "Google*google*one 01m": "Subscriptions",
-        "Vodafone Espana": "Phone & internet", "Digimobil": "Phone & internet",
+        "Vodafone Espana": "Phone", "Digimobil": "Phone",
         "Comedor Universitario": "Eating out", "Cafeteria Plaza": "Eating out",
         "Farmacia Central": "Health", "Pull & Bear": "Clothes",
         "Decathlon Connect Nevada": "Clothes",
-        "Ale-hop 98 Madrid": "Shopping", "Fotocopias Express": "Studies",
+        "Ale-hop 98 Madrid": "Shopping & tech", "Fotocopias Express": "Studies",
+        "Iberdrola Clientes": "Utilities", "Ryanair": "Travel", "Mapfre Seguros": "Car",
+        "Barberia Centro": "Hairdresser", "Digi Fibra": "Utilities",
         "Uber Eats": "Eating out", "Uber BV": "Transport",
     }
     for merchant, cat in cases.items():
