@@ -695,3 +695,86 @@ def test_compact_category_options(captured):
         db.close()
     assert income[:7] == ["Salary", "Grants", "Ride sharing", "Refunds", "Bizum received",
                           "Interest", "Other income"]
+
+
+def test_destination_card_for_unknown_iban(captured, monkeypatch):
+    monkeypatch.setattr(settings, "report_owner", "Ann Garcia Lopez", raising=False)
+    S = sessionmaker(bind=captured["engine"])
+    t = _tx(S, category="Uncategorized", review=True, merchant="Ann Garcia Lopez",
+            note="Sent from Bank To Ann Garcia Lopez", amount=Decimal("300"),
+            counterparty_iban="ES9915440000000000001234", account="Bank")
+    _run(bot.handle_update(_msg("/pending")))
+    text = _last(captured)[0]
+    assert "Transfer in your name" in text and "MyInvestor" in text
+    _run(bot.handle_update(_cb(_button(captured, "📈 Investment in MyInvestor"))))
+    tx = S().get(Transaction, t)
+    assert (tx.kind, tx.category, tx.review) == ("expense", "Investment", False)
+
+
+def test_advance_bizums_before_the_charge(captured):
+    from app.services.aggregation import period_totals
+    from app.services.bank_sync import detect_advances
+    S = sessionmaker(bind=captured["engine"])
+    today = date.today()
+    before = today - timedelta(days=20)
+    ids = [_tx(S, category="Refunds", kind="income", amount=Decimal(v), day=before,
+               merchant=f"{k} Bizum payment from: X", note=f"{k} Bizum payment from: X")
+           for k, v in (("spoty", "42"), ("spotify", "42"), ("Spoty", "84"))]
+    _tx(S, category="Refunds", kind="income", amount=Decimal("6.67"), day=before,
+        merchant="Wifi Bizum payment from: J", note="Wifi Bizum payment from: J")  # other key
+    _tx(S, category="Subscriptions", merchant="Spotify P48FDBA77", amount=Decimal("210"),
+        day=today)
+    _run(bot.handle_update(_msg("/pending")))
+    text = _last(captured)[0]
+    assert "You were charged Spotify" in text and "168.00" in text and "42.00" in text
+    _run(bot.handle_update(_cb(_button(captured, "✅ Yes, subtract them"))))
+    s = S()
+    for i in ids:
+        t = s.get(Transaction, i)
+        assert (t.kind, t.category, t.month) == ("expense", "Subscriptions", today.month)
+        assert t.amount < 0 and "advance of" in t.note
+    expense, _ = period_totals(s, today.year, today.month)
+    assert round(expense, 2) == 42.0
+    assert detect_advances(s) == []  # not asked again
+
+
+def test_prepaid_family_plan_split(captured):
+    from app.services import bank_sync as bs
+    from app.services.aggregation import period_totals
+    S = sessionmaker(bind=captured["engine"])
+    today = date.today()
+    start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)   # last month
+    for k, v in (("spoty", "42"), ("spotify", "42"), ("Spoty", "84")):
+        _tx(S, category="Refunds", kind="income", amount=Decimal(v), day=start,
+            merchant=f"{k} Bizum payment from: X", note=f"{k} Bizum payment from: X")
+    _tx(S, category="Subscriptions", merchant="Spotify P48FDBA77", amount=Decimal("21.99"),
+        day=start + timedelta(days=7))
+    _run(bot.handle_update(_msg(f"/prepaid spotify 12 {start:%m/%Y}")))
+    assert "Marked 3 Bizum" in captured["msgs"][-1][1]
+    s = S()
+    expense, income = period_totals(s, start.year, start.month)
+    assert income == 0.0 and round(expense, 2) == 7.99            # 21.99 - 168/12
+    # the last Bizum arrives late and next month's charge too: it is recomputed
+    _tx(S, category="Refunds", kind="income", amount=Decimal("42"), day=today,
+        merchant="spotify Bizum payment from: Y", note="spotify Bizum payment from: Y")
+    bs.create_prepaid_plan(S(), "spotify", 12, start, "Subscriptions")
+    _tx(S, category="Subscriptions", merchant="Spotify P48FDBA77", amount=Decimal("21.99"),
+        day=today)
+    bs.apply_prepaid(S())
+    # with the 210 the share is the same every month: 21.99 - 17.50 = 4.49
+    assert round(period_totals(S(), today.year, today.month)[0], 2) == 4.49
+    assert round(period_totals(S(), start.year, start.month)[0], 2) == 4.49
+    _run(bot.handle_update(_msg("/prepaid")))
+    assert "received 210.00" in captured["msgs"][-1][1]
+
+
+def test_prepaid_previous_cycle_with_fixed_total(captured):
+    from app.services.aggregation import period_totals
+    S = sessionmaker(bind=captured["engine"])
+    today = date.today()
+    start = (date(today.year - 1, today.month, 1) + timedelta(days=32)).replace(day=1)  # 11 months ago
+    _tx(S, category="Subscriptions", merchant="Spotify P48FDBA77", amount=Decimal("20.99"),
+        day=today)
+    _run(bot.handle_update(_msg(f"/prepaid spotify2025 12 {start:%m/%Y} Subscriptions 210")))
+    assert "Marked 0 Bizum" in captured["msgs"][-1][1]
+    assert round(period_totals(S(), today.year, today.month)[0], 2) == 3.49   # 20.99 - 17.50

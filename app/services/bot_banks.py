@@ -390,7 +390,7 @@ def _categories(db, kind: str) -> list[str]:
 
     if kind == "expense":
         for name, aliases, _ in BASE_CATEGORIES:
-            if name != "Interest":
+            if name not in ("Interest", "Salary", "Grants"):  # those are income
                 add(name, aliases)
         for c, aliases in _EXTRA_EXPENSE.items():
             add(c, aliases)
@@ -426,13 +426,15 @@ def next_pending(previous: str = "", tx_id: int | None = None) -> tuple[str, dic
         if _SKIPPED:
             q = q.where(Transaction.id.notin_(tuple(_SKIPPED)))
         if not tx_id:
-            pair = _pair_card(db, header)
+            pair = _advance_card(db, header) or _pair_card(db, header)
             if pair:
                 return pair
         tx = db.get(Transaction, tx_id) if tx_id else None
         if tx is None or not tx.review:
             tx = db.scalar(q.order_by(Transaction.date.desc()))
         total = pending_count(db)
+        if tx is not None and _is_unknown_destination(tx):
+            return _destination_card(tx, total, header)
         if tx is None:
             _SKIPPED.clear()
             done, _SESSION["done"] = _SESSION["done"], 0
@@ -595,7 +597,10 @@ def run_sync(db, force: bool = False, only: list[str] | None = None) -> dict:
     db.commit()
     if today.day == 1:  # once a month, not daily
         alerts.extend(investment_notices(db))
-    from app.services.bank_sync import detect_pairs
+    from app.services.bank_sync import detect_advances, detect_pairs
+    if detect_advances(db):
+        alerts.append("🔁 A charge arrived that your friends already paid you by Bizum. "
+                      "Confirm it in /pending")
     pairs = len(detect_pairs(db))
     if pairs:
         alerts.append(f"🔁 {pairs} possible transfer(s) between your accounts (salary moved to "
@@ -1405,3 +1410,151 @@ def balance_summary() -> str:
         lines += [f"   {html.escape(n)}: {money(s)}" + (" 🔄" if e else "") for n, s, e in group]
     lines.append(f"\n<b>Net worth: {money(total)}</b>\n<i>🔄 = updated by the bank on its own</i>")
     return "\n".join(lines)
+
+
+# --- Transfers in your name to an IBAN I do not know ---
+_DESTINATIONS: "OrderedDict[str, tuple[int, list[str]]]" = OrderedDict()
+
+
+def _is_unknown_destination(tx) -> bool:
+    from app.services.bank_sync import in_my_name
+    return bool(tx.counterparty_iban) and in_my_name(f"{tx.merchant} {tx.note}")
+
+
+def _destination_card(tx, total: int, header: str = "") -> tuple[str, dict]:
+    from app.services.bank_sync import PLATFORM_NAMES, bank_of_iban, platforms
+    from app.services.bot import _kb
+    iban = tx.counterparty_iban
+    hint = bank_of_iban(iban)
+    options = sorted({PLATFORM_NAMES.get(p, p.title()) for p in platforms()})
+    destinations = [f"investment:{o}" for o in options] + ["transfer"]
+    token = secrets.token_urlsafe(6)
+    _DESTINATIONS[token] = (tx.id, destinations)
+    while len(_DESTINATIONS) > 30:
+        _DESTINATIONS.popitem(last=False)
+    direction = "Leaves" if tx.kind == "expense" else "Arrives"
+    text = (header + f"<code>{_bar(_SESSION['done'], total)}</code>  <b>{total}</b> left\n\n"
+            f"🏦 <b>Transfer in your name</b> · {tx.date:%d/%m} · {html.escape(tx.account or '')}\n"
+            f"{direction} <b>{money(abs(tx.amount))}</b> → account {iban[:4]}…{iban[-4:]}"
+            + (f" (looks like <b>{hint}</b>)" if hint else "") +
+            "\n\nIt is none of your connected accounts. Which account is it? I will remember it.")
+    rows = [[(f"📈 Investment in {o}", f"ib:{token}:{i}")] for i, o in enumerate(options)]
+    rows.append([("🔄 Another account of mine (transfer)", f"ib:{token}:{len(destinations) - 1}")])
+    rows.append([("⏭ Skip", f"ib:{token}:s")])
+    return text, _kb(rows)
+
+
+def answer_destination(data: str) -> tuple[str, dict | None]:
+    from app.services.bank_sync import learn_iban_destination
+    _, token, choice = (data.split(":", 2) + ["", ""])[:3]
+    saved = _DESTINATIONS.pop(token, None)
+    if not saved:
+        return "⚠ Expired. Use /pending again.", None
+    tx_id, destinations = saved
+    if choice == "s":
+        _SKIPPED.add(tx_id)
+        return next_pending(previous="⏭ Skipped.")
+    try:
+        destination = destinations[int(choice)]
+    except (ValueError, IndexError):
+        return "⚠ Invalid button.", None
+    db = _db()
+    try:
+        learn_iban_destination(db, db.get(Transaction, tx_id), destination)
+    finally:
+        db.close()
+    _SESSION["done"] += 1
+    text = ("📈 Done: it counts as investing and adds to your capital. I will remember that account."
+            if destination.startswith("investment:") else
+            "🔄 Done: transfer between your accounts. I will remember that account.")
+    return next_pending(previous=text)
+
+
+# --- Advances (Bizums paid before the charge) ---
+_ADVANCES: "OrderedDict[str, tuple[int, list[int]]]" = OrderedDict()
+
+
+def _advance_card(db, header: str = "") -> tuple[str, dict] | None:
+    from app.services.bank_sync import detect_advances
+    from app.services.bot import _kb
+    found = detect_advances(db)
+    if not found:
+        return None
+    charge_id, ids, total = found[0]
+    g = db.get(Transaction, charge_id)
+    bizums = [db.get(Transaction, i) for i in ids]
+    token = secrets.token_urlsafe(6)
+    _ADVANCES[token] = (charge_id, ids)
+    while len(_ADVANCES) > 30:
+        _ADVANCES.popitem(last=False)
+    lines = "\n".join(f"   +{money(b.amount)} · {b.date:%d/%m} · {html.escape((b.merchant or '')[:35])}"
+                      for b in bizums)
+    text = (header + f"🔁 <b>You were charged {html.escape(g.merchant or '')} {money(g.amount)}</b> "
+            f"({_icon(g.category)} {html.escape(g.category)})\n\n"
+            f"Earlier you received {money(total)} in Bizums with the same key:\n{lines}\n\n"
+            f"Were they to pay for this? If yes, they subtract from the charge: it costs you "
+            f"<b>{money(g.amount - total)}</b> and they do not count as income.")
+    return text, _kb([[("✅ Yes, subtract them", f"an:{token}:yes")], [("❌ No", f"an:{token}:no")]])
+
+
+def answer_advance(data: str) -> tuple[str, dict | None]:
+    from app.services.bank_sync import resolve_advance
+    _, token, answer = (data.split(":", 2) + ["", ""])[:3]
+    saved = _ADVANCES.pop(token, None)
+    if not saved:
+        return "⚠ Expired. Use /pending again.", None
+    db = _db()
+    try:
+        resolve_advance(db, *saved, accept=(answer == "yes"))
+    finally:
+        db.close()
+    _SESSION["done"] += 1
+    return next_pending(previous=("✅ Subtracted from the charge: only your share counts."
+                                  if answer == "yes" else "👍 Understood, I will not ask again."))
+
+
+# --- /prepaid: expenses paid for you in advance (family plan...) ---
+def prepaid_txt(arg: str) -> str:
+    """/prepaid <key> <months> <mm/yyyy> [category] [fixed_total] · /prepaid lists the plans."""
+    from app.services.bank_sync import apply_prepaid, create_prepaid_plan, prepaid_plans
+    parts = (arg or "").split()
+    db = _db()
+    try:
+        if len(parts) >= 3:
+            try:
+                months = int(parts[1])
+                mm, yy = parts[2].replace("-", "/").split("/")
+                start = date(int(yy), int(mm), 1)
+            except (ValueError, IndexError):
+                return ("Usage: <code>/prepaid spotify 12 12/2026</code> (key, months, start month)\n"
+                        "Earlier cycle already paid: "
+                        "<code>/prepaid spotify2025 12 12/2025 Subscriptions 210</code>")
+            rest = parts[3:]
+            fixed = _parse_amount(rest[-1]) if rest else None
+            if fixed is not None:
+                rest = rest[:-1]
+            cat = " ".join(rest) or "Subscriptions"
+            n = create_prepaid_plan(db, parts[0], months, start, cat, fixed)
+            apply_prepaid(db)
+            head = (f"✅ Plan <b>{html.escape(parts[0])}</b>: {months} months from "
+                    f"{MONTHS[start.month]} {start.year} → {html.escape(cat)}. "
+                    f"Marked {n} Bizum(s) as paid in advance.\n\n")
+        else:
+            head = ""
+        rows = []
+        for key, (months, start, cat, fixed) in prepaid_plans(db).items():
+            received = fixed if fixed is not None else (db.scalar(
+                select(func.sum(Transaction.amount)).where(
+                    Transaction.kind == "prepaid", Transaction.category == f"Prepaid {key}")) or 0)
+            applied = -(db.scalar(select(func.sum(Transaction.amount)).where(
+                Transaction.origin == "prepaid",
+                Transaction.external_id.like(f"prepaid:{key}:%"))) or 0)
+            rows.append(f"📅 <b>{html.escape(key)}</b> · {html.escape(cat)} · {months} months from "
+                        f"{start:%m/%Y}\n   received {money(received)} → {money(received / months)}"
+                        f"/month · applied {money(applied)}")
+    finally:
+        db.close()
+    if not rows:
+        return head + ("📅 No plans. If someone pays you in advance for a charge that comes "
+                       "every month:\n<code>/prepaid spotify 12 12/2026</code>")
+    return head + "\n".join(rows)
