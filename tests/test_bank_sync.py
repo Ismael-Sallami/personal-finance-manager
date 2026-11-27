@@ -321,3 +321,40 @@ def test_investment_banks_are_configurable(monkeypatch):
     monkeypatch.setattr(settings, "investment_banks", "Acme Broker", raising=False)
     assert bs.is_platform("ACME Broker Ltd") and not bs.is_platform("Trade Republic")
     assert bs.goes_to_investment("Transfer to Acme Broker", "imagin")
+
+
+def test_destination_by_iban_investment_transfer_and_unknown(db, link, monkeypatch):
+    monkeypatch.setattr(settings, "report_owner", "Ann Garcia Lopez", raising=False)
+    db.add(BankLink(bank="Trade Republic", session_id="s", uid="tr", identification_hash="htr",
+                    role="investment", iban="ES0515860000000000005711",
+                    valid_until=datetime(2030, 1, 1)))
+    db.add(BankAccount(name="TradeRepublic", kind="investment", balance=Decimal("2500")))
+    db.commit()
+    eb = FakeEB({"u1": [
+        raw("500", name="Ann Garcia Lopez", iban="ES0515860000000000005711", tid="tr1",
+            info=["Sent from Bank To Ann Garcia Lopez"]),
+        raw("210", name="Ann Garcia Lopez", iban="ES1100000000000000000001", tid="own",
+            info=["To Ann Garcia Lopez"]),     # IBAN of the connected account itself
+        raw("300", name="Ann Garcia Lopez", iban="ES9915440000000000001234", tid="mine",
+            info=["To Ann Garcia Lopez"]),     # in your name, unknown IBAN
+    ]})
+    bs.sync_all(db, today=date(2026, 11, 10), client=eb)
+    txs = {t.external_id: t for t in db.scalars(select(Transaction))}
+    assert (txs["imagin:tr1"].kind, txs["imagin:tr1"].category) == ("expense", "Investment")
+    cap = db.scalars(select(BankAccount).where(BankAccount.kind == "investment")).all()
+    assert len(cap) == 1 and cap[0].balance == Decimal("3000")   # "Trade Republic" not duplicated
+    assert txs["imagin:own"].kind == "transfer"
+    mine = txs["imagin:mine"]
+    assert mine.review and mine.counterparty_iban == "ES9915440000000000001234"
+    assert bs.bank_of_iban(mine.counterparty_iban) == "MyInvestor"
+    bs.reclassify_pending(db)
+    assert mine.review                                           # still pending: you decide
+    bs.learn_iban_destination(db, mine, "investment:MyInvestor")
+    assert (mine.kind, mine.category) == ("expense", "Investment")
+    assert bs.iban_destinations(db)["ES9915440000000000001234"] == "investment:MyInvestor"
+
+
+def test_payroll_and_grants_are_classified_on_their_own():
+    assert bs.categorize("ACME LTD PAYROLL MAY", {}) == "Salary"
+    assert bs.categorize("UNIVERSITY GRANT 2026", {}) == "Grants"
+    assert bs.categorize("ABONO NOMINA NUMERO 1638", {}) == "Salary"

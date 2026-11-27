@@ -73,6 +73,8 @@ class Transaction(Base):
     review: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     # True = the user said this entry is not the mirror of another one (a transfer).
     pair_reviewed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # IBAN of the other party (who you pay / who pays you), when the bank gives it.
+    counterparty_iban: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
 class BrokerImport(Base):

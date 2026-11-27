@@ -103,6 +103,7 @@ COMMANDS = [
     ("cashflow", "Income vs expenses of the year [yyyy]"),
     ("networth", "Investments + banks"),
     ("balance", "Balances by kind; set one: name amount (savings, cash...)"),
+    ("prepaid", "Expense paid for you in advance: key months mm/yyyy"),
     ("invested", "Invested capital per platform [name amount]"),
     ("banks", "Balance of each account"),
     ("bank", "Set a balance by hand: name balance"),
@@ -294,6 +295,7 @@ HELP = (
     "/net [mm/yyyy | yyyy | mm/yyyy mm/yyyy] — income, expenses and net (ranges allowed)\n"
     "/networth — investments and banks\n"
     "/balance [name amount] — balances by kind; accounts the app cannot read (savings, cash)\n"
+    "/prepaid [key months mm/yyyy] — e.g. a family plan others pay for a year\n"
     "/invested [platform amount] — invested capital (Trade Republic, MyInvestor...)\n"
     "/banks — balance per account\n"
     "/bank &lt;name&gt; &lt;balance&gt; — update an account\n"
@@ -443,6 +445,16 @@ async def _handle_callback(cb: dict) -> None:
             await send_message(chat_id, HELP)
         return
 
+    if data.startswith("an:"):  # Bizums paid before the charge
+        from app.services import bot_banks as bb
+        text_, kb = bb.answer_advance(data)
+        await edit_message_text(chat_id, message_id, text_, reply_markup=kb)
+        return
+    if data.startswith("ib:"):  # destination of a transfer in your name
+        from app.services import bot_banks as bb
+        text_, kb = bb.answer_destination(data)
+        await edit_message_text(chat_id, message_id, text_, reply_markup=kb)
+        return
     if data.startswith("st:"):  # /balance: kind of the new account
         from app.services import bot_banks as bb
         await edit_message_text(chat_id, message_id, bb.create_account_kind(data[3:]))
@@ -524,7 +536,7 @@ async def _handle_callback(cb: dict) -> None:
 # --- Bank sync / analysis commands (bot_banks.py) ---
 _BANK_CMDS = {"/pace", "/merchants", "/subscriptions", "/pending", "/budget",
               "/connect", "/connections", "/sync", "/disconnect", "/categories", "/move",
-              "/breakdown", "/invested", "/balance"}
+              "/breakdown", "/invested", "/balance", "/prepaid"}
 # Commands that only make sense with the bank connected (else: "bank sync is off").
 _NEEDS_BANK = {"/connect", "/connections", "/sync", "/disconnect"}
 # menu callback -> command
@@ -569,6 +581,8 @@ async def _banks_cmd(chat_id, cmd: str, arg: str) -> None:
     elif cmd == "/balance":
         text, kb = bb.balance_txt(arg)
         await send_message(chat_id, text, reply_markup=kb)
+    elif cmd == "/prepaid":
+        await send_message(chat_id, bb.prepaid_txt(arg))
     elif cmd == "/invested":
         await send_message(chat_id, bb.invested_txt(arg))
     elif cmd == "/connections":

@@ -119,6 +119,36 @@ for the amount if not confirmed in 30 days, in `/networth`, `/banks`, the month
 close and the day-1 sync, and tells you when the connector stops being beta
 (`BANK_COUNTRY`, default ES, is the country it looks them up in).
 
+### Destination by IBAN
+
+When the bank gives the counterparty IBAN, it decides where money sent by
+transfer goes: a connected account with the investment role is Investment (and
+adds to its capital), another connected account of yours is a transfer. A
+transfer in your name (two words of `REPORT_OWNER`) to an IBAN the app does not
+know turns into a `/pending` card: investment in a platform, another account of
+yours, or skip. The answer is remembered as the rule `iban:<IBAN>`. A small table
+of Spanish bank codes (`BANK_CODES` in `bank_sync.py`) only helps word the
+question; edit it for your country. Payroll words (nomina, salario, payroll) are
+classified as Salary and grant words (beca, becas, grant) as Grants on their own.
+
+### Advances and prepaid plans
+
+If friends pay you by Bizum for a charge before it arrives (a family
+subscription), when the charge comes `/pending` asks whether those Bizums were
+to pay for it; yes moves them to the charge's category, in the charge's month, as
+refunds. For a plan paid up front every year use
+
+```
+/prepaid spotify 12 12/2026 Subscriptions        # key, months, start month, category
+/prepaid spotify2025 12 12/2025 Subscriptions 210  # earlier cycle: fixed total
+/prepaid                                           # list the plans
+```
+
+Bizums with that key (a 4-letter prefix is enough) stop counting as income (kind
+`prepaid`) and each monthly charge of the plan gets a refund of total / months
+(recomputed every time, capped at the charge, so late payers even out every
+month). A plan with a fixed total ignores incoming Bizums.
+
 ### Bank roles
 
 Each connected bank has a role, shown in `/connections` (tap "⚙ bank" to change

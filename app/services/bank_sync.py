@@ -95,8 +95,10 @@ def platform_in(text: str, bank: str) -> str | None:
 def investment_account(db: Session, platform: str) -> BankAccount:
     """The "invested capital" account of a platform (created if missing)."""
     from app.services.aggregation import INVESTMENT_KIND
-    acc = db.scalar(select(BankAccount).where(BankAccount.kind == INVESTMENT_KIND,
-                                              func.lower(BankAccount.name) == platform.lower()))
+    key = norm(platform).replace(" ", "")
+    acc = next((a for a in db.scalars(select(BankAccount).where(
+        BankAccount.kind == INVESTMENT_KIND)).all()
+        if norm(a.name).replace(" ", "") == key), None)  # "TradeRepublic" == "Trade Republic"
     if acc is None:
         acc = BankAccount(name=platform, kind=INVESTMENT_KIND, balance=Decimal("0"))
         db.add(acc)
@@ -109,6 +111,81 @@ def move_capital(db: Session, platform: str, amount: Decimal) -> None:
     It does not touch updated_at: that date is your last manual confirmation."""
     acc = investment_account(db, platform)
     acc.balance = max(Decimal("0"), (acc.balance or Decimal("0")) + amount)
+
+
+# --- Destination by IBAN: the reliable way to know which of your accounts gets the money ---
+IBAN_PREFIX = "iban:"  # learned rules: pattern "iban:ES12..." -> destination
+# Hint table (Spanish bank code -> name) to help you recognise an unknown IBAN.
+# Edit it for your country; it is only used to word the question.
+BANK_CODES = {"1544": "MyInvestor", "1586": "Trade Republic", "2100": "CaixaBank"}
+
+
+def clean_iban(iban: str | None) -> str:
+    return (iban or "").replace(" ", "").upper()
+
+
+def iban_destinations(db: Session) -> dict[str, str]:
+    """IBAN -> destination ('investment:<Platform>' | 'transfer'): your connected
+    accounts (by their role) and the IBANs you already answered about."""
+    out = {}
+    for link in db.scalars(select(BankLink)).all():
+        if link.iban:
+            name = PLATFORM_NAMES.get(norm(link.bank), link.bank)
+            out[clean_iban(link.iban)] = (f"investment:{name}" if link.role == "investment"
+                                          else "transfer")
+    for r in db.scalars(select(CategoryRule).where(
+            CategoryRule.pattern.like(IBAN_PREFIX + "%"))).all():
+        out[clean_iban(r.pattern[len(IBAN_PREFIX):])] = r.category
+    return out
+
+
+def bank_of_iban(iban: str | None) -> str | None:
+    i = clean_iban(iban)
+    return BANK_CODES.get(i[4:8]) if i.startswith("ES") and len(i) >= 8 else None
+
+
+def in_my_name(text: str) -> bool:
+    """Two words of REPORT_OWNER appear in the text."""
+    owner = norm(settings.report_owner)
+    if not owner or owner == "account owner":
+        return False
+    words = [w for w in owner.split() if len(w) >= 3]
+    t = norm(text)
+    return len(words) >= 2 and sum(matches(w, t) for w in words) >= 2
+
+
+def _is_outgoing(tx: Transaction) -> bool:
+    n = norm(tx.note)
+    return " to " in f" {n} " or "enviada" in n
+
+
+def apply_destination(db: Session, tx: Transaction, destination: str,
+                      existing: list[str]) -> None:
+    """Classify a transfer according to its known destination."""
+    if destination.startswith("investment:"):
+        platform = destination.split(":", 1)[1]
+        if tx.kind == "expense" or (tx.kind == "transfer" and tx.amount > 0 and _is_outgoing(tx)):
+            tx.kind, tx.category, tx.review = "expense", investment_category(existing), False
+            move_capital(db, platform, abs(tx.amount))
+        else:  # money coming back from the platform
+            tx.kind, tx.category, tx.review = "transfer", TRANSFER, False
+            move_capital(db, platform, -abs(tx.amount))
+    else:
+        tx.kind, tx.category, tx.review = "transfer", TRANSFER, False
+
+
+def learn_iban_destination(db: Session, tx: Transaction, destination: str) -> None:
+    """The user said where that IBAN goes: it is remembered and applied."""
+    iban = clean_iban(tx.counterparty_iban)
+    if iban:
+        pattern = IBAN_PREFIX + iban
+        r = db.scalar(select(CategoryRule).where(CategoryRule.pattern == pattern))
+        if r:
+            r.category = destination
+        else:
+            db.add(CategoryRule(pattern=pattern, category=destination))
+    apply_destination(db, tx, destination, existing_categories(db))
+    db.commit()
 
 
 def investment_category(existing: list[str]) -> str:
@@ -258,6 +335,13 @@ def text_is_transfer(text: str, bank: str) -> bool:
     return any(b in t for b in OWN_BANKS if b not in norm(bank))
 
 
+def text_is_transfer_without_owner(text: str, bank: str) -> bool:
+    """Transfer recognisable without looking at the owner's name (pots, another bank of yours)."""
+    t = norm(text)
+    return any(c in t for c in TRANSFER_KEYS) or \
+        any(b in t for b in OWN_BANKS if b not in norm(bank))
+
+
 def is_transfer(m: BankEntry, own_ibans: set[str], bank: str) -> bool:
     if m.counterparty_iban and m.counterparty_iban.replace(" ", "") in own_ibans:
         return True
@@ -367,7 +451,8 @@ def reopen_negatives(db: Session) -> list[int]:
 
 
 def user_rules(db: Session) -> dict[str, str]:
-    return {r.pattern: r.category for r in db.scalars(select(CategoryRule)).all()}
+    return {r.pattern: r.category for r in db.scalars(select(CategoryRule)).all()
+            if not r.pattern.startswith((IBAN_PREFIX, PREPAID_PREFIX))}
 
 
 def start_date(link: BankLink, today: date) -> date:
@@ -419,6 +504,8 @@ def save_movements(db: Session, link: BankLink, raws: list[dict],
     rules = user_rules(db)
     expense_only = expense_only_categories(db)
     existing_cats = existing_categories(db)
+    destinations = iban_destinations(db)
+    plans = prepaid_plans(db)
     entries = [m for m in (normalize(r, link.bank, link.uid) for r in raws) if m]
     if not entries:
         return
@@ -431,7 +518,34 @@ def save_movements(db: Session, link: BankLink, raws: list[dict],
             continue
         known.add(m.external_id)
         target = platform_in(f"{m.merchant} {m.description}", link.bank)
-        if m.kind == "expense" and target:
+        text = f"{m.merchant} {m.description}"
+        pkey = (prepaid_key(f"{m.description} {m.merchant}", plans)
+                if m.kind == "income" and plans and "bizum" in norm(text) else None)
+        if pkey:  # Bizum for a prepaid plan: it is not income
+            db.add(Transaction(
+                date=m.date, year=m.date.year, month=m.date.month, category=f"Prepaid {pkey}",
+                kind="prepaid", amount=m.amount, note=m.description or None, origin="bank",
+                external_id=m.external_id, merchant=m.merchant, account=acc.name, review=False,
+                pair_reviewed=True, counterparty_iban=clean_iban(m.counterparty_iban) or None))
+            continue
+        by_iban = destinations.get(clean_iban(m.counterparty_iban)) if m.counterparty_iban else None
+        if by_iban and by_iban.startswith("investment:"):
+            platform = by_iban.split(":", 1)[1]
+            if m.kind == "expense":
+                kind, cat, review = "expense", investment_category(existing_cats), False
+                move_capital(db, platform, m.amount)
+            else:
+                kind, cat, review = "transfer", TRANSFER, False
+                move_capital(db, platform, -m.amount)
+                res.transfers += 1
+        elif by_iban:
+            kind, cat, review = "transfer", TRANSFER, False
+            res.transfers += 1
+        elif (m.counterparty_iban and in_my_name(text)
+              and not text_is_transfer_without_owner(text, link.bank)):
+            # In your name but to an account I do not know: ask (and remember).
+            kind, cat, review = m.kind, UNCATEGORIZED, True
+        elif m.kind == "expense" and target:
             kind, cat, review = "expense", investment_category(existing_cats), False
             move_capital(db, target, m.amount)       # contribution
         elif m.kind == "income" and target:
@@ -450,6 +564,7 @@ def save_movements(db: Session, link: BankLink, raws: list[dict],
             category=cat, kind=kind, amount=m.amount,
             note=m.description or None, origin="bank", external_id=m.external_id,
             merchant=m.merchant, account=acc.name, review=review,
+            counterparty_iban=clean_iban(m.counterparty_iban) or None,
         )
         if kind != "transfer" and not review:
             assign_category(tx, cat, expense_only, db=db)
@@ -514,6 +629,7 @@ def sync_all(db: Session, today: date | None = None, client=None,
             else:
                 res.errors.append(f"{link.bank}: {str(exc)[:120]}")
     res.reclassified = reclassify_pending(db)
+    apply_prepaid(db)
     if res.accounts:
         from app.services.aggregation import snapshot_today
         snapshot_today(db)
@@ -528,10 +644,19 @@ def reclassify_pending(db: Session) -> int:
     rules = user_rules(db)
     expense_only = expense_only_categories(db)
     existing_cats = existing_categories(db)
+    destinations = iban_destinations(db)
     n = 0
     for tx in db.scalars(select(Transaction).where(Transaction.review.is_(True),
                                                    Transaction.origin == "bank")).all():
         text = f"{tx.merchant} {tx.note}"
+        if tx.counterparty_iban:
+            destination = destinations.get(clean_iban(tx.counterparty_iban))
+            if destination:  # known IBAN (connected account or already answered)
+                apply_destination(db, tx, destination, existing_cats)
+                n += 1
+                continue
+            if in_my_name(text):
+                continue  # in your name to an account I do not know: you decide
         if is_platform(tx.account):  # e.g. the "Unknown" rows of an investment platform
             tx.kind, tx.category, tx.review = "transfer", TRANSFER, False
             n += 1
@@ -663,6 +788,9 @@ BASE_CATEGORIES = [
       "nintendo", "bolera", "discoteca", "concierto")),
     # Income
     ("Interest", ("interest",), ("interest", "intereses", "zinsen", "interes")),
+    ("Salary", ("salary", "payroll", "work", "nomina", "salario", "trabajo"),
+     ("nomina", "abono nomina", "salario", "payroll")),
+    ("Grants", ("grants", "grant", "scholarship", "becas", "beca"), ("beca", "becas", "grant")),
 ]
 
 
@@ -726,3 +854,155 @@ def resolve_pair(db: Session, out_id: int, in_id: int, is_transfer: bool) -> Non
             tx.kind, tx.category, tx.review = "transfer", TRANSFER, False
         tx.pair_reviewed = True
     db.commit()
+
+
+# --- Advances: Bizums that paid for a charge BEFORE it arrived (family plan...) ---
+ADVANCE_DAYS = 75
+ADVANCE_CATS = ("Refunds", "Bizum received")
+
+
+def _common_key(pattern: str, text: str) -> bool:
+    """'spotify' matches 'spoty' or 'spotify' in the description (4-letter prefix)."""
+    if len(pattern) < 4:
+        return False
+    return any(w[:4] == pattern[:4] for w in _words(text))
+
+
+def detect_advances(db: Session, today: date | None = None) -> list[tuple[int, list[int], Decimal]]:
+    """(expense_id, [income ids], total) for recent charges that have earlier Bizums
+    with the same key not reviewed yet."""
+    today = today or date.today()
+    out = []
+    charges = db.scalars(select(Transaction).where(
+        Transaction.origin == "bank", Transaction.kind == "expense", Transaction.amount > 0,
+        Transaction.pair_reviewed.is_(False), Transaction.review.is_(False),
+        Transaction.date >= today - timedelta(days=45))).all()
+    for g in charges:
+        pattern = pattern_of(g.merchant, g.note)
+        if not pattern:
+            continue
+        cands = db.scalars(select(Transaction).where(
+            Transaction.kind == "income", Transaction.category.in_(ADVANCE_CATS),
+            Transaction.pair_reviewed.is_(False),
+            Transaction.date >= g.date - timedelta(days=ADVANCE_DAYS),
+            Transaction.date <= g.date + timedelta(days=15)).order_by(Transaction.date)).all()
+        chosen, total = [], Decimal("0")
+        for c in cands:
+            before = norm(c.note or c.merchant).split("bizum")[0]
+            if _common_key(pattern, before) and total + c.amount <= g.amount:
+                chosen.append(c.id)
+                total += c.amount
+        if chosen:
+            out.append((g.id, chosen, total))
+    return out
+
+
+def resolve_advance(db: Session, charge_id: int, income_ids: list[int], accept: bool) -> None:
+    """Yes: the incomes subtract from the charge's category, in the charge's month
+    (when they are offset); the original date stays in the note. No: not asked again."""
+    g = db.get(Transaction, charge_id)
+    g.pair_reviewed = True
+    for i in income_ids:
+        tx = db.get(Transaction, i)
+        if tx is None:
+            continue
+        tx.pair_reviewed = True
+        if accept:
+            original = tx.date
+            tx.date, tx.year, tx.month = g.date, g.date.year, g.date.month
+            tx.note = f"{(tx.note or '')[:200]} (advance of {original:%d/%m/%Y})"
+            tx.kind, tx.amount, tx.category, tx.review = "expense", -abs(tx.amount), g.category, False
+    db.commit()
+
+
+# --- Prepaid plans (/prepaid): a family subscription paid up front, etc. ---
+# Rule "prepaid:<key>" -> "<months>|<yyyy-mm start>|<category>|<fixed total>". Bizums
+# with the key become kind "prepaid" (not income) and each charge of the plan gets
+# a refund = total / months (recomputed always; late payers even out every month).
+PREPAID_PREFIX = "prepaid:"
+
+
+def prepaid_plans(db: Session) -> dict[str, tuple[int, date, str, Decimal | None]]:
+    """key -> (months, start, category, fixed_total). fixed_total: what was paid in
+    an earlier cycle that is not in the app (e.g. last year's Bizums)."""
+    out = {}
+    for r in db.scalars(select(CategoryRule).where(
+            CategoryRule.pattern.like(PREPAID_PREFIX + "%"))).all():
+        parts = r.category.split("|")
+        months, start, cat = parts[0], parts[1], parts[2]
+        fixed = Decimal(parts[3]) if len(parts) > 3 and parts[3] else None
+        y, m = map(int, start.split("-"))
+        out[r.pattern[len(PREPAID_PREFIX):]] = (int(months), date(y, m, 1), cat, fixed)
+    return out
+
+
+def _month_n(start: date, d: date) -> int:
+    return (d.year - start.year) * 12 + d.month - start.month + 1
+
+
+def prepaid_key(text: str, plans: dict) -> str | None:
+    """Plan (without a fixed total) an incoming Bizum belongs to."""
+    before = norm(text).split("bizum")[0]
+    return next((k for k, v in plans.items() if v[3] is None and _common_key(k, before)), None)
+
+
+def create_prepaid_plan(db: Session, key: str, months: int, start: date, category: str,
+                        fixed_total: Decimal | None = None) -> int:
+    """Create/update the plan and mark the Bizums already received with that key
+    (a plan with a fixed total marks nothing: that money is not in the app)."""
+    key = norm(key).split()[0]
+    pattern = PREPAID_PREFIX + key
+    value = f"{months}|{start:%Y-%m}|{category}|{fixed_total if fixed_total is not None else ''}"
+    r = db.scalar(select(CategoryRule).where(CategoryRule.pattern == pattern))
+    if r:
+        r.category = value
+    else:
+        db.add(CategoryRule(pattern=pattern, category=value))
+    if fixed_total is not None:
+        db.commit()
+        return 0
+    plans = {key: (months, start, category, fixed_total)}
+    n = 0
+    for tx in db.scalars(select(Transaction).where(
+            Transaction.date >= start - timedelta(days=150),
+            Transaction.kind.in_(("income", "expense")))).all():
+        text = f"{tx.note or ''} {tx.merchant or ''}"
+        incoming_bizum = "bizum" in norm(text) and (tx.kind == "income" or tx.amount < 0)
+        if incoming_bizum and prepaid_key(text, plans):
+            tx.kind, tx.amount = "prepaid", abs(tx.amount)
+            tx.category, tx.review, tx.pair_reviewed = f"Prepaid {key}", False, True
+            n += 1
+    db.commit()
+    return n
+
+
+def apply_prepaid(db: Session) -> int:
+    """Each charge of the plan, in its months, gets the month's share: total / months."""
+    done = 0
+    for key, (months, start, cat, fixed) in prepaid_plans(db).items():
+        received = fixed if fixed is not None else Decimal(str(db.scalar(
+            select(func.sum(Transaction.amount)).where(
+                Transaction.kind == "prepaid", Transaction.category == f"Prepaid {key}")) or 0))
+        share = (received / months).quantize(Decimal("0.01"))
+        charges = [t for t in db.scalars(select(Transaction).where(
+            Transaction.kind == "expense", Transaction.amount > 0, Transaction.origin == "bank",
+            Transaction.date >= start)).all()
+            if pattern_of(t.merchant, t.note)[:4] == key[:4] and 1 <= _month_n(start, t.date) <= months]
+        seen = set()
+        for c in sorted(charges, key=lambda t: t.date):
+            n = _month_n(start, c.date)
+            if n in seen:
+                continue
+            seen.add(n)
+            ext = f"prepaid:{key}:{c.date:%Y-%m}"
+            tx = db.scalar(select(Transaction).where(Transaction.external_id == ext))
+            if tx is None:
+                tx = Transaction(date=c.date, year=c.date.year, month=c.date.month, kind="expense",
+                                 category=cat, origin="prepaid", external_id=ext,
+                                 merchant=f"Paid in advance ({key})", amount=Decimal("0"))
+                db.add(tx)
+            tx.amount = -min(share, c.amount)
+            tx.note = f"{n}/{months} · {received} € / {months}"
+            done += 1
+    db.commit()
+    return done
