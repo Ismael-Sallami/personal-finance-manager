@@ -326,12 +326,12 @@ def test_investment_banks_are_configurable(monkeypatch):
 def test_destination_by_iban_investment_transfer_and_unknown(db, link, monkeypatch):
     monkeypatch.setattr(settings, "report_owner", "Ann Garcia Lopez", raising=False)
     db.add(BankLink(bank="Trade Republic", session_id="s", uid="tr", identification_hash="htr",
-                    role="investment", iban="ES0515860000000000005711",
+                    role="investment", iban="ES7615860000000000001234",
                     valid_until=datetime(2030, 1, 1)))
     db.add(BankAccount(name="TradeRepublic", kind="investment", balance=Decimal("2500")))
     db.commit()
     eb = FakeEB({"u1": [
-        raw("500", name="Ann Garcia Lopez", iban="ES0515860000000000005711", tid="tr1",
+        raw("500", name="Ann Garcia Lopez", iban="ES7615860000000000001234", tid="tr1",
             info=["Sent from Bank To Ann Garcia Lopez"]),
         raw("210", name="Ann Garcia Lopez", iban="ES1100000000000000000001", tid="own",
             info=["To Ann Garcia Lopez"]),     # IBAN of the connected account itself
